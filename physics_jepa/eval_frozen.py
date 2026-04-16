@@ -182,6 +182,8 @@ class FrozenEvaluator:
         results: List[Dict] = []
         if self.eval_mode in ("linear", "linear_and_knn"):
             results += self.run_linear(train_f, val_f, test_f)
+        if self.eval_mode in ("knn", "linear_and_knn"):
+            results += self.run_knn(train_f, val_f, test_f)
         return results
 
     # ------------------------------------------------------------------ linear
@@ -274,6 +276,63 @@ class FrozenEvaluator:
                 metrics = self._per_param_mse(head(x), y)
                 out.append({"probe_type": "linear", "k": None, "metric": None,
                             "split": name, **metrics})
+        return out
+
+
+    # --------------------------------------------------------------------- knn
+    def run_knn(self, train_f, val_f, test_f) -> List[Dict]:
+        from sklearn.neighbors import KNeighborsRegressor
+
+        knn_cfg = self.cfg.ft.knn
+        x_tr = train_f["features"].numpy()
+        y_tr = train_f["labels"].numpy()
+        x_va = val_f["features"].numpy()
+        y_va = val_f["labels"].numpy()
+        x_te = test_f["features"].numpy()
+        y_te = test_f["labels"].numpy()
+
+        out: List[Dict] = []
+        best = None
+        for metric in knn_cfg.metrics:
+            algorithm = "brute" if metric == "cosine" else "auto"
+            for k in knn_cfg.ks:
+                if k > len(x_tr):
+                    print(f"[knn] skipping k={k} > n_train={len(x_tr)}", flush=True)
+                    continue
+                model = KNeighborsRegressor(
+                    n_neighbors=k, metric=metric, algorithm=algorithm, n_jobs=-1,
+                )
+                model.fit(x_tr, y_tr)
+                for name, x, y in (("val", x_va, y_va), ("test", x_te, y_te)):
+                    pred = torch.from_numpy(model.predict(x))
+                    target = torch.from_numpy(y)
+                    metrics = self._per_param_mse(pred, target)
+                    row = {"probe_type": "knn", "k": k, "metric": metric,
+                           "split": name, **metrics}
+                    out.append(row)
+                    if name == "val":
+                        if self._wandb_on:
+                            wandb.log({f"knn/{metric}/k{k}_val_mse_mean": metrics["mse_mean"]})
+                        if best is None or metrics["mse_mean"] < best["val_mse_mean"]:
+                            best = {
+                                "k": k, "metric": metric,
+                                "val_mse_mean": metrics["mse_mean"],
+                            }
+                    print(
+                        f"[knn] k={k:3d} metric={metric:9s} split={name:4s} "
+                        f"mse_mean={metrics['mse_mean']:.4f}",
+                        flush=True,
+                    )
+
+        if best is not None:
+            # Add a knn_best row for val and test using the best val config
+            for r in out:
+                if (
+                    r["probe_type"] == "knn"
+                    and r["k"] == best["k"]
+                    and r["metric"] == best["metric"]
+                ):
+                    out.append({**r, "probe_type": "knn_best"})
         return out
 
 
