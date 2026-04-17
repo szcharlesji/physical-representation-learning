@@ -17,7 +17,7 @@ set -euo pipefail
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
 IMAGE=/share/apps/images/cuda13.0.1-cudnn9.13.0-ubuntu-24.04.3.sif
-CKPT_DIR=/scratch/$USER/physics_jepa/ckpts
+CKPT_DIR=/scratch/$USER/physical-representation-learning/ckpts
 CONFIG=configs/train_activematter_small.yaml
 
 mkdir -p "$CKPT_DIR"
@@ -31,10 +31,10 @@ singularity exec --nv \
   --overlay "$OVERLAY:ro" \
   --bind /scratch/$USER:/scratch/$USER \
   "$IMAGE" bash -c "
-    source /share/apps/anaconda3/2024.02/etc/profile.d/conda.sh
+    source /ext3/env.sh
     conda activate jepa
     cd $REPO
-    export THE_WELL_DATA_DIR=/scratch/$USER/physics_jepa/data
+    export THE_WELL_DATA_DIR=/scratch/$USER/physical-representation-learning/data
     export WANDB_API_KEY=\${WANDB_API_KEY:-}
     torchrun --standalone --nproc_per_node=2 -m physics_jepa.train \
       --config $CONFIG \
