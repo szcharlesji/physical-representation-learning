@@ -35,6 +35,11 @@ def vicreg_loss_3d(
     x,y: (B, C, T, H, W)
     """
 
+    # Under bf16 autocast the variance/cov epsilon and small-difference math
+    # are numerically unstable; promote stats to fp32.
+    if x.dtype == torch.bfloat16 or y.dtype == torch.bfloat16:
+        fp32_stats = True
+
     # Flatten to (N, C) where N = B*T*H*W
     x = rearrange(x, 'b c t h w -> (b t h w) c')
     y = rearrange(y, 'b c t h w -> (b t h w) c')
