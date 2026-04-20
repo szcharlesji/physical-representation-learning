@@ -5,6 +5,8 @@ defaults:
 
 dataset:
   num_frames: 16
+  resize_mode: fft
+  resolution: [256, 256]
 
 model:
   objective: "jepa"
@@ -32,7 +34,7 @@ train:
   lr: 1e-4 # following 1e-3 * global_batch_size/256 rule
   weight_decay: 0.05
   noise_std: 1.0
-  run_name: "noise-std-1.0"
+  run_name: "noise-std-1.0-fft-native"
   distributed: true
 
 ft:

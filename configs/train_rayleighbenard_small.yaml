@@ -5,6 +5,8 @@ defaults:
 
 dataset:
   num_frames: 16
+  resize_mode: fft
+  resolution: [128, 128]
 
 model:
   objective: "jepa"
@@ -26,7 +28,7 @@ train:
   min_lr: 1e-6
   lr: 1e-4 # following 1e-3 * global_batch_size/256 rule
   weight_decay: 0.05
-  run_name: "lr1e-4-warmup6epochs-5chunksloss"
+  run_name: "lr1e-4-warmup6epochs-5chunksloss-fft-native"
   distributed: true
 
 ft:
