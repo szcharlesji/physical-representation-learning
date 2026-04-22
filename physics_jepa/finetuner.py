@@ -214,6 +214,7 @@ class BaseFinetuner(Trainer, ABC):
             resolution=self.cfg.dataset.get("resolution", None),
             offset=self.cfg.dataset.get("offset", None),
             noise_std=self.cfg.ft.get("noise_std", 0.0),
+            resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
         )
         self.val_loader = get_val_dataloader(
             self.cfg.dataset.name,
@@ -231,6 +232,7 @@ class BaseFinetuner(Trainer, ABC):
             resolution=self.cfg.dataset.get("resolution", None),
             offset=self.cfg.dataset.get("offset", None),
             noise_std=self.cfg.ft.get("noise_std", 0.0),
+            resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
         )
         
         encoder = self.load_model()
