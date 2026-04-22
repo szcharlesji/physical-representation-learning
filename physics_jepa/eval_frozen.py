@@ -70,6 +70,7 @@ class FrozenEvaluator:
             self.cfg.dataset.name,
             str(self.cfg.dataset.num_frames),
             str(self.cfg.dataset.get("resolution", None)),
+            str(self.cfg.dataset.get("resize_mode", "bilinear")),
             self.feature_pool,
         ])
         return hashlib.sha1(s.encode()).hexdigest()[:16]
@@ -83,6 +84,7 @@ class FrozenEvaluator:
             resolution=self.cfg.dataset.get("resolution", None),
             offset=self.cfg.dataset.get("offset", None),
             noise_std=0.0,
+            resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
         )
         return DataLoader(
             dataset,

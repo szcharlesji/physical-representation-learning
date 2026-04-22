@@ -78,7 +78,8 @@ class Trainer:
         if self.train_cfg.get("run_name", None) is not None:
             run_name = f"{run_name}-{self.train_cfg.run_name}"
         if self.rank == 0 and not self.cfg.dry_run:
-            wandb.init(project="physics-jepa" if 'seed' not in self.cfg.out_path else "physics-jepa-seeds",
+            default_project = "physics-jepa" if 'seed' not in self.cfg.out_path else "physics-jepa-seeds"
+            wandb.init(project=os.environ.get("WANDB_PROJECT", default_project),
                 name=run_name,
                 config=OmegaConf.to_container(self.cfg))
 

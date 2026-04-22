@@ -14,6 +14,8 @@ import random
 import weakref
 from collections import OrderedDict
 
+from physics_jepa.utils.data_utils import fft_resize_2d
+
 class WellDatasetForJEPA(Dataset):
     """
     Auto-discovers HDF5 shards and yields (context, target) windows from full trajectories.
@@ -37,6 +39,7 @@ class WellDatasetForJEPA(Dataset):
         stride: int = None, # temporal overlap of training examples, default is num_frames
         subset_config_path: Optional[str | Path] = None, # path to config file containing subset_indices
         noise_std: float = 0.0, # standard deviation of Gaussian noise to add
+        resize_mode: str = "bilinear", # "bilinear" | "fft" | "none"; fft bypasses per-dataset crop
         # HDF5 handle/cache tuning:
         max_open_files: int = 6,
         rdcc_nbytes: int = 512 * 1024**2,
@@ -45,6 +48,8 @@ class WellDatasetForJEPA(Dataset):
     ):
         if split == "val":
             split = "valid"
+        if resize_mode not in ("bilinear", "fft", "none"):
+            raise ValueError(f"resize_mode must be one of bilinear|fft|none, got {resize_mode!r}")
 
         self.data_dir = Path(data_dir) / "data" / split
         self.dataset_name = Path(data_dir).stem
@@ -53,6 +58,7 @@ class WellDatasetForJEPA(Dataset):
         assert self.num_frames > 0
         self.stride = stride
         self.resolution = resolution
+        self.resize_mode = resize_mode
         self.noise_std = float(noise_std)
         if self.noise_std > 0:
             print(f"Adding Gaussian noise with std {self.noise_std}", flush=True)
@@ -134,10 +140,12 @@ class WellDatasetForJEPA(Dataset):
                 raise RuntimeError(f"No fields found in {sample_path}")
             # take shape/dtype from the first field
             _, _, H, W = f[field_paths[0]].shape # t0_fields has shape (N, T, H, W)
-            if self.dataset_name == "shear_flow":
-                H = W = 256 # cut shear flow x axis in half to make square
-            if self.dataset_name == "rayleigh_benard":
-                H = W = 128 # take middle 128x128 square
+            # fft mode keeps native H, W and resamples later; other modes pre-crop to a square
+            if self.resize_mode != "fft":
+                if self.dataset_name == "shear_flow":
+                    H = W = 256 # cut shear flow x axis in half to make square
+                if self.dataset_name == "rayleigh_benard":
+                    H = W = 128 # take middle 128x128 square
             dtype = f[field_paths[0]].dtype
 
         d_sizes = np.asarray(d_sizes, dtype=np.int64)
@@ -189,7 +197,11 @@ class WellDatasetForJEPA(Dataset):
         tgt = np.empty((F, H, W, C), dtype=self._dtype, order="C")
 
        # selections: time-contiguous 2F slice
-        if self.dataset_name == "shear_flow":
+        if self.resize_mode == "fft":
+            # fft mode reads the full native HxW; resampling happens after the read
+            h_slice = slice(None)
+            w_slice = slice(None)
+        elif self.dataset_name == "shear_flow":
             h_slice = slice(None)
             w_slice = slice(0, W)
         elif self.dataset_name == "rayleigh_benard":
@@ -233,8 +245,13 @@ class WellDatasetForJEPA(Dataset):
 
         # Optional resize
         if self.resolution is not None and tuple(ctx_t.shape[-2:]) != tuple(self.resolution):
-            ctx_t = torch.nn.functional.interpolate(ctx_t, size=self.resolution, mode='bilinear', align_corners=False)
-            tgt_t = torch.nn.functional.interpolate(tgt_t, size=self.resolution, mode='bilinear', align_corners=False)
+            if self.resize_mode == "fft":
+                ctx_t = fft_resize_2d(ctx_t, self.resolution[0], self.resolution[1])
+                tgt_t = fft_resize_2d(tgt_t, self.resolution[0], self.resolution[1])
+            elif self.resize_mode == "bilinear":
+                ctx_t = torch.nn.functional.interpolate(ctx_t, size=self.resolution, mode='bilinear', align_corners=False)
+                tgt_t = torch.nn.functional.interpolate(tgt_t, size=self.resolution, mode='bilinear', align_corners=False)
+            # resize_mode == "none": leave at native size
 
         # Add Gaussian noise if specified
         if self.noise_std > 0:
@@ -611,12 +628,12 @@ class WellDatasetForMPP(Dataset):
 
 
 def get_dataset(
-    dataset_name, 
-    num_frames, 
-    split="train", 
+    dataset_name,
+    num_frames,
+    split="train",
     task=None,
-    include_labels=False, 
-    num_examples=None, 
+    include_labels=False,
+    num_examples=None,
     predict_n_steps=False,
     n_steps=1,
     fields=None,
@@ -625,9 +642,13 @@ def get_dataset(
     offset=None,
     subset_config_path=None,
     noise_std=0.0,
+    resize_mode="bilinear",
 ):
 
-    resolution = (resolution, resolution) if isinstance(resolution, int) else resolution
+    if isinstance(resolution, int):
+        resolution = (resolution, resolution)
+    elif resolution is not None:
+        resolution = tuple(resolution)
     well_data_dir = os.environ.get("THE_WELL_DATA_DIR")
     if well_data_dir is None:
         raise ValueError("THE_WELL_DATA_DIR environment variable is not set. "
@@ -640,6 +661,7 @@ def get_dataset(
         stride=offset,
         subset_config_path=subset_config_path,
         noise_std=noise_std,
+        resize_mode=resize_mode,
     )
 
 def get_dataset_metadata(dataset_name):
@@ -677,6 +699,7 @@ def get_train_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None
         offset=cfg.dataset.get("offset", None),
         subset_config_path=cfg.dataset.get("subset_config_path", None),
         noise_std=cfg[stage].get("noise_std", 0.0),
+        resize_mode=cfg.dataset.get("resize_mode", "bilinear"),
     )
 
 def get_val_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None):
@@ -696,21 +719,22 @@ def get_val_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None):
         resolution=cfg.dataset.get("resolution", None),
         offset=cfg.dataset.get("offset", None),
         noise_std=cfg[stage].get("noise_std", 0.0),
+        resize_mode=cfg.dataset.get("resize_mode", "bilinear"),
     )
 
 def get_train_dataloader(
         dataset_name,
         num_frames,
         num_examples,
-        batch_size, 
+        batch_size,
         task=None,
         rank=0,
-        world_size=1, 
-        seed=42, 
+        world_size=1,
+        seed=42,
         shuffle=True,
-        num_workers=4, 
-        persistent_workers=True, 
-        pin_memory=True, 
+        num_workers=4,
+        persistent_workers=True,
+        pin_memory=True,
         prefetch_factor=2,
         include_labels=False,
         predict_n_steps=False,
@@ -721,14 +745,15 @@ def get_train_dataloader(
         offset=None,
         subset_config_path=None,
         noise_std=0.0,
+        resize_mode="bilinear",
     ):
     dataset = get_dataset(dataset_name,
-                          num_frames, 
-                          split="train", 
-                          include_labels=include_labels, 
-                          num_examples=num_examples, 
-                          predict_n_steps=predict_n_steps, 
-                          task=task, 
+                          num_frames,
+                          split="train",
+                          include_labels=include_labels,
+                          num_examples=num_examples,
+                          predict_n_steps=predict_n_steps,
+                          task=task,
                           n_steps=n_steps,
                           fields=fields,
                           balance_classes=balance_classes,
@@ -736,6 +761,7 @@ def get_train_dataloader(
                           offset=offset,
                           subset_config_path=subset_config_path,
                           noise_std=noise_std,
+                          resize_mode=resize_mode,
                         )
     if rank == 0:
         print(f"total number of block pairs in train dataset: {len(dataset)}")
@@ -777,14 +803,14 @@ def get_val_dataloader(
         dataset_name,
         num_frames,
         num_examples,
-        batch_size, 
+        batch_size,
         task=None,
-        rank=0, 
-        world_size=1, 
-        seed=42, 
+        rank=0,
+        world_size=1,
+        seed=42,
         shuffle=False,
-        persistent_workers=True, 
-        pin_memory=True, 
+        persistent_workers=True,
+        pin_memory=True,
         prefetch_factor=2,
         include_labels=False,
         predict_n_steps=False,
@@ -794,13 +820,14 @@ def get_val_dataloader(
         resolution=None,
         offset=None,
         noise_std=0.0,
+        resize_mode="bilinear",
     ):
-    dataset = get_dataset(dataset_name, 
-                          num_frames, 
-                          split="val", 
-                          include_labels=include_labels, 
-                          num_examples=num_examples, 
-                          predict_n_steps=predict_n_steps, 
+    dataset = get_dataset(dataset_name,
+                          num_frames,
+                          split="val",
+                          include_labels=include_labels,
+                          num_examples=num_examples,
+                          predict_n_steps=predict_n_steps,
                           task=task,
                           n_steps=n_steps,
                           fields=fields,
@@ -808,6 +835,7 @@ def get_val_dataloader(
                           resolution=resolution,
                           offset=offset,
                           noise_std=noise_std,
+                          resize_mode=resize_mode,
                         )
     if world_size == 1:
         sampler = None
