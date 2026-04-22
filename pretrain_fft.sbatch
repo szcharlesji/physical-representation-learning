@@ -31,10 +31,10 @@ REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
 IMAGE=/share/apps/images/cuda13.0.1-cudnn9.13.0-ubuntu-24.04.3.sif
 
-# Dedicated W&B project + run group so fft runs never collide with the 224-bilinear baseline.
+# FFT runs live in the same W&B project as the baseline; they're tagged by
+# `resize_mode=fft` (auto-added from cfg.dataset.resize_mode) and grouped by
+# pretrain run so linear/knn/attentive probes cluster with their checkpoint.
 # The run_name suffix "-fft-native" is also set in each config.
-export WANDB_PROJECT=physics-jepa-fft
-export WANDB_RUN_GROUP=fft-native
 
 # Checkpoints land in a separate subtree so artifact paths stay distinguishable.
 OUT_PATH=$REPO/checkpoints_fft
@@ -42,7 +42,7 @@ OUT_PATH=$REPO/checkpoints_fft
 trap 'echo "[$(date)] SIGUSR1 received — exiting for requeue"; exit 0' USR1
 
 echo "[$(date)] Job $SLURM_JOB_ID on $(hostname) — dataset=$DATASET, config=$CONFIG"
-echo "wandb project=$WANDB_PROJECT, group=$WANDB_RUN_GROUP, out_path=$OUT_PATH"
+echo "out_path=$OUT_PATH"
 nvidia-smi
 
 singularity exec --nv \
@@ -55,8 +55,6 @@ singularity exec --nv \
     export THE_WELL_DATA_DIR=$REPO/datasets
     export HDF5_USE_FILE_LOCKING=FALSE
     export WANDB_API_KEY=\${WANDB_API_KEY:-}
-    export WANDB_PROJECT=$WANDB_PROJECT
-    export WANDB_RUN_GROUP=$WANDB_RUN_GROUP
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     torchrun --standalone --nproc_per_node=1 \
       -m physics_jepa.train_jepa \

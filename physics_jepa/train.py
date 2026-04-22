@@ -25,6 +25,7 @@ from .utils.misc import distprint
 from .utils.train_utils import ddp_setup, gather_losses_and_report
 from .utils.model_summary import summarize_convs
 from .attentive_pooler import AttentiveClassifier
+from .utils.wandb_utils import init_run as wandb_init_run
 
 class Trainer:
     def __init__(self, cfg, stage="train"):
@@ -77,11 +78,17 @@ class Trainer:
         run_name = f"{self.cfg.dataset.name}-{self.cfg.dataset.num_frames}frames-{self.cfg.model.name}-{self.cfg.model.objective}"
         if self.train_cfg.get("run_name", None) is not None:
             run_name = f"{run_name}-{self.train_cfg.run_name}"
+        # Compute the run-instance id now so wandb group matches the on-disk
+        # checkpoint dir; training_loop reuses the same timestamp.
+        self.date_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        group = f"{run_name}_{self.date_str}"
         if self.rank == 0 and not self.cfg.dry_run:
-            default_project = "physics-jepa" if 'seed' not in self.cfg.out_path else "physics-jepa-seeds"
-            wandb.init(project=os.environ.get("WANDB_PROJECT", default_project),
-                name=run_name,
-                config=OmegaConf.to_container(self.cfg))
+            wandb_init_run(
+                self.cfg,
+                job_type="pretrain",
+                group=group,
+                name=group,
+            )
 
         self.training_loop(model_components, loss_fn, optimizer, run_name)
 
@@ -131,7 +138,7 @@ class Trainer:
         if not self.is_iterable_dataset:
             distprint(f"starting to train w/ {len(self.train_loader)} batches per device", local_rank=self.rank)
 
-        date_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        date_str = getattr(self, "date_str", None) or datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         out_path = Path(self.cfg.out_path) / f"{run_name}_{date_str}"
 
         if self.rank == 0:
@@ -288,6 +295,25 @@ class Trainer:
         gc.collect()
 
         val_losses_dict = gather_losses_and_report(val_losses_dict, {'val/epoch': epoch}, self.rank, self.world_size, split='val', dry_run=self.cfg.dry_run)
+
+        # Unified probe metric: mirror val/loss into probe/val_mse on probe runs
+        # (regression task only) so linear/knn/attentive can be overlaid directly.
+        job_type = getattr(self, "wandb_job_type", None)
+        if (
+            self.rank == 0
+            and not self.cfg.dry_run
+            and isinstance(job_type, str)
+            and job_type.startswith("probe_")
+            and self.cfg.get("ft", {}).get("task") == "regression"
+            and val_losses_dict is not None
+        ):
+            val_mse = val_losses_dict.get("val/loss")
+            if val_mse is not None:
+                wandb.log({"probe/val_mse": val_mse, "probe/epoch": epoch})
+                best = getattr(self, "_best_probe_val_mse", float("inf"))
+                if val_mse < best:
+                    self._best_probe_val_mse = val_mse
+                    wandb.run.summary["probe/best_val_mse"] = val_mse
 
         return val_losses_dict
 

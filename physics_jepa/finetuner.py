@@ -29,6 +29,7 @@ from .utils.model_utils import RegressionHead, RegressionMLP
 from .attentive_pooler import AttentiveClassifier
 from .utils.train_utils import accuracy
 from .train import Trainer
+from .utils.wandb_utils import init_run as wandb_init_run, group_from_checkpoint
 from .videomae import vit_small_patch16_224, vit_base_patch16_224, vit_large_patch16_224, vit_huge_patch16_224
 
 class BaseFinetuner(Trainer, ABC):
@@ -97,11 +98,31 @@ class BaseFinetuner(Trainer, ABC):
         return enc_ctx, labels
     
     def train(self):
-        run_name = self.cfg.ft.get("run_name", f"{self.cfg.dataset.name}-{self.cfg.dataset.num_frames}frames-{self.cfg.model.objective + '-FT' if not self.cfg.ft.get('not_from_embeddings', False) else 'supervised'}-{self.cfg.ft.task}{f'-randominit' if self.trained_model_path is None else ''}")
+        # Derive job_type from config: attentive pooling is the paper's
+        # attentive probe; otherwise fall back to the head_type.
+        if self.cfg.ft.get("use_attentive_pooling", False):
+            job_type = "probe_attentive"
+        else:
+            head_type = self.cfg.ft.get("head_type", "linear")
+            job_type = f"probe_{head_type}" if head_type in ("linear", "mlp") else "probe_linear"
+        self.wandb_job_type = job_type  # picked up by Trainer.training_loop for probe/* metrics
+
+        group = group_from_checkpoint(self.trained_model_path)
+        ckpt_stem = Path(self.trained_model_path).stem if self.trained_model_path else "randominit"
+        default_name = f"{group}-{job_type}-{ckpt_stem}"
+        run_name = self.cfg.ft.get("run_name") or default_name
+
         if self.rank == 0 and not self.cfg.dry_run:
-            wandb.init(project="physics-jepa",
+            wandb_init_run(
+                self.cfg,
+                job_type=job_type,
+                group=group,
                 name=run_name,
-                config=OmegaConf.to_container(self.cfg))
+                extra_config={
+                    "probe_type": job_type.replace("probe_", ""),
+                    "checkpoint_path": str(Path(self.trained_model_path).resolve()) if self.trained_model_path else None,
+                },
+            )
         
         if self.cfg.ft.get("not_from_embeddings", False):
             encoder = self.get_encoder_and_raw_loaders()

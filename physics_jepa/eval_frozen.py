@@ -21,6 +21,7 @@ from tqdm import tqdm
 from .data import get_dataset
 from .model import get_model_and_loss_cnn
 from .utils.hydra import compose
+from .utils.wandb_utils import init_run as wandb_init_run, group_from_checkpoint
 
 
 PARAM_NAMES = ["alpha", "zeta"]  # scalars are sorted alphabetically in data.py:_build_index
@@ -134,23 +135,36 @@ class FrozenEvaluator:
         )
         return out
 
-    def _init_wandb(self):
+    def _init_wandb_for_probe(self, probe_type: str):
+        """Start a wandb run scoped to a single probe type.
+
+        `probe_type` is "linear" or "knn". Group ties the run to the pretrain
+        checkpoint so pretrain + probes cluster together in the W&B UI.
+        """
         if self.cfg.get("dry_run", False):
             self._wandb_on = False
             return
-        run_name = self.cfg.ft.get("run_name") or (
-            f"{self.cfg.dataset.name}-frozen-{self.eval_mode}-"
-            f"{Path(self.checkpoint_path).stem}"
-        )
-        wandb.init(
-            project="physics-jepa",
-            name=run_name,
-            config=OmegaConf.to_container(self.cfg),
+        group = group_from_checkpoint(self.checkpoint_path)
+        ckpt_stem = Path(self.checkpoint_path).stem  # e.g. ConvEncoder_11
+        name = self.cfg.ft.get("run_name") or f"{group}-probe_{probe_type}-{ckpt_stem}"
+        wandb_init_run(
+            self.cfg,
+            job_type=f"probe_{probe_type}",
+            group=group,
+            name=name,
+            extra_config={
+                "probe_type": probe_type,
+                "checkpoint_path": str(Path(self.checkpoint_path).resolve()),
+            },
         )
         self._wandb_on = True
 
+    def _finish_wandb(self):
+        if getattr(self, "_wandb_on", False):
+            wandb.finish()
+            self._wandb_on = False
+
     def run(self):
-        self._init_wandb()
         encoder = self.load_encoder()
         train_f = self.extract_features(encoder, "train")
         val_all = self.extract_features(encoder, "val")
@@ -183,13 +197,15 @@ class FrozenEvaluator:
 
         results: List[Dict] = []
         if self.eval_mode in ("linear", "linear_and_knn"):
+            self._init_wandb_for_probe("linear")
             results += self.run_linear(train_f, val_f, test_f)
+            self._finish_wandb()
         if self.eval_mode in ("knn", "linear_and_knn"):
+            self._init_wandb_for_probe("knn")
             results += self.run_knn(train_f, val_f, test_f)
+            self._finish_wandb()
 
         self._report(results, mean=mean.tolist(), std=std.tolist())
-        if self._wandb_on:
-            wandb.finish()
         return results
 
     def _report(self, results: List[Dict], mean, std):
@@ -292,6 +308,9 @@ class FrozenEvaluator:
                 "linear/train_mse": train_mse,
                 "linear/lr": scheduler.get_last_lr()[0],
                 **{f"linear/val_{k}": v for k, v in val_metrics.items()},
+                # unified cross-probe metric so linear/knn/attentive overlay in W&B
+                "probe/val_mse": val_metrics["mse_mean"],
+                "probe/epoch": epoch,
             }
             if self._wandb_on:
                 wandb.log(log)
@@ -312,13 +331,23 @@ class FrozenEvaluator:
         head.load_state_dict(best_state)
         head.eval()
         out: List[Dict] = []
+        final_by_split: Dict[str, Dict] = {}
         with torch.no_grad():
             for name, f in (("val", val_f), ("test", test_f)):
                 x = f["features"].to(self.device)
                 y = f["labels"].to(self.device)
                 metrics = self._per_param_mse(head(x), y)
+                final_by_split[name] = metrics
                 out.append({"probe_type": "linear", "k": None, "metric": None,
                             "split": name, **metrics})
+        if self._wandb_on:
+            wandb.log({
+                "probe/best_val_mse": best_val,
+                "probe/val_mse_final": final_by_split["val"]["mse_mean"],
+                "probe/test_mse_final": final_by_split["test"]["mse_mean"],
+            })
+            wandb.run.summary["probe/best_val_mse"] = best_val
+            wandb.run.summary["probe/test_mse_final"] = final_by_split["test"]["mse_mean"]
         return out
 
 
@@ -336,6 +365,9 @@ class FrozenEvaluator:
 
         out: List[Dict] = []
         best = None
+        # Per-(metric,k) pair, treat as a virtual "step" so `probe/val_mse`
+        # plots a curve over configs rather than a single scalar.
+        step = 0
         for metric in knn_cfg.metrics:
             algorithm = "brute" if metric == "cosine" else "auto"
             for k in knn_cfg.ks:
@@ -346,6 +378,8 @@ class FrozenEvaluator:
                     n_neighbors=k, metric=metric, algorithm=algorithm, n_jobs=-1,
                 )
                 model.fit(x_tr, y_tr)
+                pair_metrics_val = None
+                pair_metrics_test = None
                 for name, x, y in (("val", x_va, y_va), ("test", x_te, y_te)):
                     pred = torch.from_numpy(model.predict(x))
                     target = torch.from_numpy(y)
@@ -354,18 +388,31 @@ class FrozenEvaluator:
                            "split": name, **metrics}
                     out.append(row)
                     if name == "val":
-                        if self._wandb_on:
-                            wandb.log({f"knn/{metric}/k{k}_val_mse_mean": metrics["mse_mean"]})
+                        pair_metrics_val = metrics
                         if best is None or metrics["mse_mean"] < best["val_mse_mean"]:
                             best = {
                                 "k": k, "metric": metric,
                                 "val_mse_mean": metrics["mse_mean"],
+                                "test_mse_mean": None,
                             }
+                    else:
+                        pair_metrics_test = metrics
+                        if best is not None and best["k"] == k and best["metric"] == metric:
+                            best["test_mse_mean"] = metrics["mse_mean"]
                     print(
                         f"[knn] k={k:3d} metric={metric:9s} split={name:4s} "
                         f"mse_mean={metrics['mse_mean']:.4f}",
                         flush=True,
                     )
+                if self._wandb_on and pair_metrics_val is not None:
+                    wandb.log({
+                        f"knn/{metric}/k{k}_val_mse_mean": pair_metrics_val["mse_mean"],
+                        "probe/val_mse": pair_metrics_val["mse_mean"],
+                        "probe/knn_k": k,
+                        "probe/knn_metric_is_cosine": 1 if metric == "cosine" else 0,
+                        "probe/step": step,
+                    })
+                step += 1
 
         if best is not None:
             # Add a knn_best row for val and test using the best val config
@@ -376,6 +423,16 @@ class FrozenEvaluator:
                     and r["metric"] == best["metric"]
                 ):
                     out.append({**r, "probe_type": "knn_best"})
+            if self._wandb_on:
+                wandb.log({
+                    "probe/best_val_mse": best["val_mse_mean"],
+                    "probe/test_mse_final": best["test_mse_mean"],
+                })
+                wandb.run.summary["probe/best_val_mse"] = best["val_mse_mean"]
+                if best["test_mse_mean"] is not None:
+                    wandb.run.summary["probe/test_mse_final"] = best["test_mse_mean"]
+                wandb.run.summary["probe/best_knn_k"] = best["k"]
+                wandb.run.summary["probe/best_knn_metric"] = best["metric"]
         return out
 
 
