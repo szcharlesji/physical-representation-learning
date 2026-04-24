@@ -361,14 +361,16 @@ class Trainer:
         if self.cfg.model.objective == 'jepa':
             # Pass model_cfg so build_encoder can dispatch on
             # cfg.model.backbone (conv3d_next | conv3d_next_attn | vit3d).
+            # std_coeff / cov_coeff only matter for the VICReg path; sigreg
+            # runs replace loss_fn below and ignore them.
             encoder, predictor, loss_fn = get_model_and_loss_cnn(
                 self.cfg.model.dims,
                 self.cfg.model.num_res_blocks,
                 self.cfg.dataset.num_frames,
                 in_chans=self.cfg.dataset.num_chans if 'fields' not in self.train_cfg else len(self.train_cfg.fields),
-                sim_coeff=self.train_cfg.sim_coeff,
-                std_coeff=self.train_cfg.std_coeff,
-                cov_coeff=self.train_cfg.cov_coeff,
+                sim_coeff=self.train_cfg.get("sim_coeff", 25),
+                std_coeff=self.train_cfg.get("std_coeff", 25),
+                cov_coeff=self.train_cfg.get("cov_coeff", 1),
                 model_cfg=self.cfg.model,
                 img_size=self.cfg.dataset.get("resolution", None),
             )

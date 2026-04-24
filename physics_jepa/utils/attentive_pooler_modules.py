@@ -45,16 +45,17 @@ class Attention(nn.Module):
         qk_scale=None,
         attn_drop=0.,
         proj_drop=0.,
-        hidden_dim=384,
         use_sdpa=True
     ):
         super().__init__()
+        assert dim % num_heads == 0, f"dim={dim} must be divisible by num_heads={num_heads}"
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
-        self.qkv = nn.Linear(dim, hidden_dim, bias=qkv_bias)
+        # qkv projects dim -> 3*dim, split into (q, k, v) each with dim channels.
+        self.qkv = nn.Linear(dim, 3 * dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(hidden_dim, dim)
+        self.proj = nn.Linear(dim, dim)
         self.proj_drop_prob = proj_drop
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_sdpa = use_sdpa
