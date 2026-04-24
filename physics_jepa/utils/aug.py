@@ -1,13 +1,13 @@
 """Sample-level JEPA augmentations.
 
-All augmentations are applied *identically* to context and target so the
-JEPA prediction task stays well-posed. The augmenter draws random choices
-once per sample and replays them on both tensors.
+Geometric transforms (rotation, reflection, translation) and channel
+dropout are drawn once per sample and applied *identically* to the
+context and target tensors so the JEPA prediction task stays well-posed.
+Gaussian noise is drawn independently for each side.
 
 Tensor shape convention: (C, T, H, W) torch float tensor (one sample).
-
-Default configuration is a no-op, so omitting the `augment` block in the
-train config reproduces prior behavior exactly.
+The default AugmentConfig is a no-op; SampleAugmenter short-circuits
+immediately in that case.
 """
 from __future__ import annotations
 
@@ -75,8 +75,6 @@ class SampleAugmenter:
     def __call__(self, ctx: torch.Tensor, tgt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         c = self.cfg
         if c.is_noop():
-            # still honor legacy noise_std if set (handled by caller), but here
-            # no-op fast path avoids extra allocations.
             return ctx, tgt
 
         # -- shared geometric transforms --

@@ -156,9 +156,9 @@ class ConvEncoder(nn.Module):
 
         self.dims = dims
 
-        # Optional per-stage self-attention (Phase 3). When attn_stages is
-        # empty/None the encoder is structurally identical to the original
-        # ConvEncoder - parameters and forward output match byte-for-byte.
+        # Stage indices (0..len(dims)-1) after whose ResidualBlock stack a
+        # transformer `Block` is inserted. Empty -> no attention modules;
+        # self.attn_blocks stays empty and adds no parameters.
         self.attn_stages = tuple(sorted(set(int(i) for i in (attn_stages or []))))
         self.attn_blocks = nn.ModuleDict()
         for stage_idx in self.attn_stages:
@@ -660,8 +660,8 @@ def constant_schedule_array(base_value, steps, warmup_steps=0, start_warmup_valu
 class ArrayLRScheduler:
     """Generic scheduler that steps through a precomputed schedule array.
 
-    Used for `linear` and `constant` schedules; `cosine` keeps its own class
-    for backwards-compatible state_dict shape.
+    Used for `linear` and `constant` schedules. `CosineLRScheduler` is a
+    separate class so its state_dict shape stays stable for resumes.
     """
 
     def __init__(self, optimizer, schedule, step=0):

@@ -12,9 +12,10 @@
 #SBATCH --error=pretrain_exp_%j.err
 #SBATCH --signal=B:USR1@120
 
-# Phase 2/3 experiments launcher. Auto-probe is on for all of these so
-# every saved checkpoint gets linear + kNN + attentive probes at the end
-# of training, clustered under the pretrain run's W&B group.
+# Regularizer / backbone experiments launcher. Auto-probe is on for all
+# of these so every saved checkpoint gets linear + kNN + attentive
+# probes at the end of training, clustered under the pretrain run's W&B
+# group.
 #
 # usage:
 #   sbatch pretrain_experiment.sbatch sigreg       # SIGReg regularizer

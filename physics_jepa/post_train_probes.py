@@ -5,9 +5,8 @@ kNN) and JepaFinetuner (attentive) as single-GPU, in-process evaluations.
 Each probe uses its own W&B run whose `group` matches the pretrain group,
 so pretrain + probes cluster together in the W&B UI.
 
-This module is gated on `cfg.post_train_eval.enabled`; it is a no-op when
-that flag is missing or false, so existing YAMLs without the block continue
-to produce the same behavior as before.
+Gated on `cfg.post_train_eval.enabled`: a missing or false flag makes this
+module a no-op.
 """
 from __future__ import annotations
 

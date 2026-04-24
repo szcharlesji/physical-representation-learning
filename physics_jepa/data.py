@@ -51,7 +51,9 @@ class WellDatasetForJEPA(Dataset):
         subset_config_path: Optional[str | Path] = None, # path to config file containing subset_indices
         noise_std: float = 0.0, # standard deviation of Gaussian noise to add
         resize_mode: str = "bilinear", # "bilinear" | "fft" | "none"; fft bypasses per-dataset crop
-        # Phase 2 knobs (optional; None = legacy path = behavior-preserving):
+        # When augment_cfg is None the sample-level augmentations collapse
+        # to the `noise_std`-only path; norm_stats=None disables per-channel
+        # normalization entirely.
         augment_cfg: Optional[AugmentConfig] = None,
         norm_stats: Optional[NormStats] = None,
         # HDF5 handle/cache tuning:
@@ -77,8 +79,9 @@ class WellDatasetForJEPA(Dataset):
         if self.noise_std > 0:
             print(f"Adding Gaussian noise with std {self.noise_std}", flush=True)
 
-        # Phase 2: augmentations + per-channel normalization.
-        # When augment_cfg is None we follow the legacy `noise_std`-only path.
+        # augment_cfg bundles noise/rotation/flip/translation/channel-drop;
+        # we build a SampleAugmenter only if at least one knob is non-trivial.
+        # norm_stats carries per-channel (mean, std) for z-scoring.
         self.augment_cfg = augment_cfg
         self.augmenter = (
             SampleAugmenter(augment_cfg)
@@ -281,17 +284,15 @@ class WellDatasetForJEPA(Dataset):
                 tgt_t = torch.nn.functional.interpolate(tgt_t, size=self.resolution, mode='bilinear', align_corners=False)
             # resize_mode == "none": leave at native size
 
-        # Phase 2: per-channel normalization (no-op when norm_stats is None
-        # or mode == "none"). Applied *before* augment so aug noise is in
-        # normalized space.
+        # Normalize before augmenting so injected noise lives in z-scored
+        # space (no-op when norm_stats is None or mode=="none").
         if self.norm_stats is not None and not self.norm_stats.is_noop():
             ctx_t = self.norm_stats.apply(ctx_t)
             tgt_t = self.norm_stats.apply(tgt_t)
 
-        # Phase 2: augmentations. When augment_cfg is set, it fully replaces
-        # the legacy noise_std path (augment.noise_std is the preferred knob).
-        # Otherwise fall through to the legacy Gaussian-noise-only path so
-        # existing YAMLs reproduce prior behavior byte-identically.
+        # A SampleAugmenter subsumes Gaussian noise via its own `noise_std`;
+        # fall back to the standalone self.noise_std path when no augmenter
+        # is configured so `train.noise_std` alone still works.
         if self.augmenter is not None:
             ctx_t, tgt_t = self.augmenter(ctx_t, tgt_t)
         elif self.noise_std > 0:
@@ -728,8 +729,8 @@ def get_dataset_metadata(dataset_name):
 def _build_augment_from_cfg(cfg, stage: str) -> Optional[AugmentConfig]:
     """Return AugmentConfig or None.
 
-    When the stage's `augment` block is absent we return None, which tells
-    the dataset to take the legacy noise_std-only path (behavior-preserving).
+    Returns None when the stage has no `augment` block; the dataset then
+    uses only `cfg[stage].noise_std` as the sole augmentation.
     """
     stage_cfg = cfg[stage]
     aug_block = stage_cfg.get("augment", None) if hasattr(stage_cfg, "get") else None

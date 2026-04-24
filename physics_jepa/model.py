@@ -12,10 +12,12 @@ from physics_jepa.utils.model_utils import ConvEncoder, ConvPredictor, ConvDecod
 def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
     """Factory for the pretrain encoder selected by `model_cfg.backbone`.
 
-    Defaults to `conv3d_next` when the key is missing, reproducing the
-    pre-Phase-3 behavior exactly. `conv3d_next_attn` inserts self-attention
-    at the stage indices in `model_cfg.attn_stages` (empty -> identical to
-    conv3d_next). `vit3d` swaps in the ViT3DEncoder.
+    - `conv3d_next` (default): ConvEncoder with no attention modules.
+    - `conv3d_next_attn`: ConvEncoder with a transformer Block inserted
+      after the ResidualBlock stack at each index in `model_cfg.attn_stages`.
+      An empty list produces a structurally identical encoder to
+      `conv3d_next` (no added parameters).
+    - `vit3d`: ViT3DEncoder with 3D patch embedding and transformer stack.
     """
     backbone = None
     if hasattr(model_cfg, "get"):
@@ -60,9 +62,9 @@ def get_model_and_loss_cnn(dims, num_res_blocks, num_frames, in_chans=2, sim_coe
                            model_cfg=None, img_size=None):
     """Build (encoder, predictor, loss) tuple.
 
-    Backwards-compatible: when `model_cfg` is not passed, falls back to the
-    original ConvEncoder construction using the positional `dims` /
-    `num_res_blocks` / `num_frames`.
+    Pass `model_cfg` to dispatch on `cfg.model.backbone`. Without it, the
+    function ignores backbone selection and always builds a plain
+    ConvEncoder from the positional `dims` / `num_res_blocks` / `num_frames`.
     """
     if model_cfg is not None:
         encoder = build_encoder(model_cfg, num_frames=num_frames, in_chans=in_chans, img_size=img_size)

@@ -75,9 +75,9 @@ All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, 
 
 - `try-fft` — FFT-based resize replacing the per-dataset crop. All three train configs set `resize_mode: fft` and explicit `resolution: [H, W]`. Checkpoints land in `checkpoints_fft/` via `pretrain_fft.sbatch` + `WANDB_PROJECT=physics-jepa-fft`. When evaluating FFT checkpoints, the eval configs must match (`resize_mode: fft` + matching resolution) — the eval paths now honor `resize_mode`, but `eval.sbatch` points at `train_activematter_frozen.yaml` which is still at 224/bilinear and needs matching FFT overrides if used against an FFT checkpoint.
 
-## Phase 2/3 config axes
+## Optional pretrain config axes
 
-All Phase 2/3 knobs are opt-in: omitting them reproduces the pre-phase behavior byte-for-byte. The active_matter baseline config (`train_activematter_small.yaml`) does **not** use any of these, so existing runs are unchanged. Three new configs demonstrate each axis in isolation:
+These knobs are all opt-in and default to no-ops; the three `train_*_small.yaml` baselines don't set any of them, so they keep their current behavior. Three dedicated configs demonstrate each axis in isolation:
 
 - `configs/train_activematter_sigreg.yaml` — `train.regularizer: sigreg` (LeWM-style; `sim_coeff*MSE + bcs_coeff*SIGReg`, defaults `bcs_coeff=0.1, num_slices=1024`)
 - `configs/train_activematter_vit3d.yaml` — `model.backbone: vit3d` (3D patch embed + transformer stack; output reshaped to 4D so ConvPredictor still works)
@@ -108,7 +108,7 @@ Also exposes `train.grad_clip_norm` (default None → no clipping) and new LR sc
   - `reflections: true|false`
   - `translations_px: int` (gated by `periodic_bcs`; per-dataset default in `_DATASET_PERIODIC_BCS` at [physics_jepa/data.py](physics_jepa/data.py): active_matter=true, shear_flow=true, rayleigh_benard=false).
   All geometric/channel transforms are drawn once per sample and applied identically to ctx and tgt. Noise is drawn independently per side.
-- If the `augment` block is absent, the dataset falls through to the legacy `noise_std`-only path so existing YAMLs are byte-identical.
+- If the `augment` block is absent, the dataset applies only `cfg[stage].noise_std` (preserving the bare-noise behavior of the baseline configs).
 
 ### Encoder backbones (`model.backbone`)
 
@@ -117,11 +117,11 @@ Selected by `build_encoder` in [physics_jepa/model.py](physics_jepa/model.py):
 - `conv3d_next_attn` — same `ConvEncoder` with `attn_stages: [idx, ...]` inserting a transformer `Block` after the ResidualBlock stack at each listed stage. `attn_stages=[]` is structurally identical to `conv3d_next`.
 - `vit3d` — new `ViT3DEncoder` (3D patch embed → N transformer blocks → time-collapsed (B, D, H', W') output). Config under `model.vit3d` (patch_size, embed_dim, depth, num_heads, mlp_ratio). Note: `model.dims[-1]` should equal the ViT `embed_dim` so `ConvPredictor(dims=reversed(encoder.dims)[:2])` receives matching channels.
 
-### Out-of-scope / future
+### Known limitations
 
-- `model.{patch_size, strides, norm}` knobs for `conv3d_next` are not wired (requires deeper refactor); only `attn_stages` is exposed in Phase 3.
-- `train.early_stop.enabled` is scaffolded but raises `NotImplementedError` until Phase 4.
-- Probe auto-run still active_matter only; `FrozenEvaluator.PARAM_NAMES` remains hardcoded to `["alpha", "zeta"]`.
+- `model.{patch_size, strides, norm}` knobs for `conv3d_next` are not wired; only `attn_stages` is exposed for that backbone.
+- `train.early_stop.enabled` raises `NotImplementedError` — the periodic in-training probe needed to drive it isn't wired.
+- Probe auto-run is active_matter only; `FrozenEvaluator.PARAM_NAMES` is hardcoded to `["alpha", "zeta"]`. Extending to shear_flow / rayleigh_benard requires swapping that for `get_dataset_metadata(...).constant_scalar_names`.
 
 ## Editing etiquette
 

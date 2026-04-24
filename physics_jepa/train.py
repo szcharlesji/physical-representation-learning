@@ -65,8 +65,8 @@ class Trainer:
 
         model_components, loss_fn = self.get_model_components()
 
-        # build_optimizer defaults to AdamW(lr, weight_decay|0.05, betas=(0.9,0.95))
-        # so omitting train.optim reproduces the prior behavior exactly.
+        # Defaults to AdamW(lr, weight_decay=0.05, betas=(0.9, 0.95)); override
+        # via the optional `train.optim` block.
         params = [p for component in model_components for p in list(component.parameters())]
         optimizer = build_optimizer(params, self.train_cfg)
         distprint(
@@ -99,10 +99,10 @@ class Trainer:
         if self.world_size > 1:
             dist.destroy_process_group()
 
-        # Auto-probe at end of pretraining (rank 0 only). Gated on
-        # cfg.post_train_eval.enabled so existing YAMLs without the block are
-        # untouched. Runs linear + kNN (FrozenEvaluator) and attentive
-        # (JepaFinetuner) probes on every saved checkpoint.
+        # Auto-probe at end of pretraining (rank 0 only). When
+        # cfg.post_train_eval.enabled is true, runs linear + kNN
+        # (FrozenEvaluator) and attentive (JepaFinetuner) probes on every
+        # saved checkpoint under run_dir.
         if self.rank == 0 and self.cfg.get("post_train_eval", {}).get("enabled", False):
             from .post_train_probes import run_post_train_probes
             run_post_train_probes(self.cfg, run_dir)
@@ -123,17 +123,16 @@ class Trainer:
 
         steps = self.train_cfg.num_epochs * self.train_cfg.steps if 'steps' in self.train_cfg else self.train_cfg.num_epochs * len(self.train_loader)
 
-        # Setup LR scheduler. Supports cosine (default when "cosine" is set),
-        # linear, and constant. Any other value (including None) = no scheduler,
-        # preserving prior behavior for configs that don't opt in.
+        # LR scheduler: cosine | linear | constant. When unset, lr stays at
+        # self.train_cfg.lr for the whole run.
         sched_name = self.train_cfg.get("lr_scheduler", None)
         if sched_name is None:
             lr_scheduler = None
         else:
             max_lr = self.train_cfg.get("lr", self.train_cfg.lr)
             min_lr = self.train_cfg.get("min_lr", 1e-6)
-            # IterableDataset has no __len__; warmup-from-epochs is undefined there,
-            # so fall back to 0 (preserves existing behavior path).
+            # IterableDataset has no __len__; warmup-from-epochs is undefined
+            # there, so fall back to 0 and rely on `lr_scheduler_warmup_steps`.
             if isinstance(self.train_loader.dataset, IterableDataset):
                 warmup_steps_from_epochs = 0
             else:
@@ -158,17 +157,18 @@ class Trainer:
                 start_step=self.train_cfg.get("start_step", 0) // grad_accum_steps,
             )
 
-        # Grad-clip: default None = no clipping (matches prior behavior).
+        # Global-norm gradient clipping; None disables.
         grad_clip_norm = self.train_cfg.get("grad_clip_norm", None)
         if grad_clip_norm is not None:
             distprint(f"grad_clip_norm={grad_clip_norm}", local_rank=self.rank)
 
-        # Early-stop scaffold: not yet implemented (needs periodic in-training
-        # probe). Reject an opt-in flag so silent no-ops don't confuse users.
+        # Probe-based early stopping requires in-training probing, which is
+        # not wired up here; surface the flag as a hard error rather than
+        # silently ignoring it.
         if self.train_cfg.get("early_stop", {}).get("enabled", False):
             raise NotImplementedError(
-                "train.early_stop.enabled is scaffolded but not implemented; "
-                "disable it or wait for Phase 4."
+                "train.early_stop.enabled requires periodic in-training probing "
+                "which is not wired; disable it to proceed."
             )
 
         if not self.is_iterable_dataset:
@@ -359,10 +359,8 @@ class Trainer:
 
     def get_model_components(self):
         if self.cfg.model.objective == 'jepa':
-            # Phase 3: pass model_cfg so build_encoder picks up backbone switch
-            # (conv3d_next | conv3d_next_attn | vit3d). When model.backbone is
-            # missing, build_encoder falls back to the original ConvEncoder
-            # construction - byte-identical to the previous behavior.
+            # Pass model_cfg so build_encoder can dispatch on
+            # cfg.model.backbone (conv3d_next | conv3d_next_attn | vit3d).
             encoder, predictor, loss_fn = get_model_and_loss_cnn(
                 self.cfg.model.dims,
                 self.cfg.model.num_res_blocks,
@@ -433,10 +431,10 @@ class Trainer:
         else:
             raise ValueError(f"Invalid model objective: {self.cfg.model.objective}")
         
-        # Regularizer switch. Order of precedence:
-        #   1. train.regularizer: vicreg | sigreg  (preferred)
-        #   2. legacy model.loss: gaussian_matching (alias for sigreg)
-        # Both default to vicreg so existing YAMLs reproduce prior behavior.
+        # Regularizer selection, in precedence order:
+        #   1. train.regularizer: vicreg | sigreg
+        #   2. model.loss=gaussian_matching  (alias for sigreg)
+        #   3. vicreg
         regularizer = self.train_cfg.get("regularizer", None)
         if regularizer is None:
             if 'loss' in self.cfg.model and self.cfg.model.loss == 'gaussian_matching':
@@ -444,7 +442,8 @@ class Trainer:
             else:
                 regularizer = "vicreg"
         if regularizer == "sigreg":
-            # paper defaults: lambda=0.1, M=1024 (LeWM paper); here sim*MSE + bcs*SIGReg.
+            # sim*MSE + bcs*SIGReg, matching the LeWM two-term objective
+            # (paper defaults: lambda=0.1, M=1024).
             from .model import vicreg_loss_bcs
             from functools import partial
             loss_fn = partial(
@@ -460,7 +459,7 @@ class Trainer:
                 local_rank=self.rank,
             )
         elif regularizer == "vicreg":
-            distprint("regularizer=vicreg (default)", local_rank=self.rank)
+            distprint("regularizer=vicreg", local_rank=self.rank)
         else:
             raise ValueError(f"unknown train.regularizer: {regularizer!r}; expected vicreg|sigreg")
 

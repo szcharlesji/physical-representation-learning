@@ -38,12 +38,13 @@ def build_tags(cfg, extra: Optional[Iterable[str]] = None) -> list:
     resize_mode = ds.get("resize_mode", "bilinear")
     objective = model.get("objective")
 
-    # Phase 3: real architecture identifier (the `model.name` from the preset
-    # stays "cnn" even when backbone=vit3d because it's baked into the preset).
+    # `model.name` often comes from a preset YAML and may not reflect
+    # the actual architecture; emit `backbone` so architecture can be
+    # filtered independently from the preset label.
     backbone = model.get("backbone", "conv3d_next")
 
-    # Phase 2: regularizer. Fall back to the legacy `model.loss=gaussian_matching`
-    # alias, otherwise default to vicreg (what unconfigured runs used).
+    # Honor the `model.loss=gaussian_matching` alias for `regularizer=sigreg`,
+    # and default a JEPA objective to vicreg when neither is set.
     regularizer = train.get("regularizer", None)
     if regularizer is None:
         if model.get("loss", None) == "gaussian_matching":

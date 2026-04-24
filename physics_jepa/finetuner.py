@@ -218,9 +218,9 @@ class BaseFinetuner(Trainer, ABC):
         return pred, loss_dict
 
     def get_encoder_and_raw_loaders(self):
-        # If pretrain used per-channel normalization, match at probe time so
-        # the frozen encoder sees the same pixel distribution. No-op when
-        # cfg.dataset.normalize is unset (behavior-preserving).
+        # Match the pretrain-time per-channel normalization (if any) so the
+        # frozen encoder receives the pixel distribution it was trained on.
+        # Returns None when cfg.dataset.normalize is unset.
         norm_stats = _build_norm_stats_from_cfg(self.cfg, rank=self.rank or 0)
         # make new loaders that have larger batch size for calculating embeddings
         self.train_loader = get_train_dataloader(
@@ -497,9 +497,8 @@ class BaseFinetuner(Trainer, ABC):
 # JEPA Finetuner
 class JepaFinetuner(BaseFinetuner):
     def load_model(self):
-        # Pass model_cfg so build_encoder picks the backbone that matches
-        # the pretrain; otherwise a vit3d checkpoint would fail to load
-        # into a ConvEncoder with mismatched state-dict keys.
+        # Dispatch on cfg.model.backbone so a vit3d checkpoint loads into a
+        # ViT3DEncoder rather than a ConvEncoder with mismatched state-dict.
         encoder, _, _ = get_model_and_loss_cnn(
             self.cfg.model.dims,
             self.cfg.model.num_res_blocks,

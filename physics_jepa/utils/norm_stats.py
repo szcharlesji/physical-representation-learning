@@ -1,9 +1,10 @@
 """Per-channel normalization stats with disk caching.
 
-`mode=none` is the default and a strict no-op (behavior-preserving for
-existing YAMLs). `mode=per_channel_zscore` computes (mean, std) once per
-(dataset, resolution, resize_mode, num_frames) on the training split and
-caches to disk.
+`mode=none` returns a NormStats whose `.apply()` is a no-op.
+`mode=per_channel_zscore` computes (mean, std) once over the training
+split, keyed by (dataset, resolution, resize_mode, num_frames), and
+caches the tensors to disk so every subsequent loader finds the same
+statistics.
 """
 from __future__ import annotations
 
