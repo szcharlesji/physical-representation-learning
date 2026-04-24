@@ -92,8 +92,20 @@ class Trainer:
 
         self.training_loop(model_components, loss_fn, optimizer, run_name)
 
+        # Compute the same run directory that training_loop used so auto-probe
+        # can locate the saved checkpoints.
+        run_dir = Path(self.cfg.out_path) / f"{run_name}_{self.date_str}"
+
         if self.world_size > 1:
             dist.destroy_process_group()
+
+        # Auto-probe at end of pretraining (rank 0 only). Gated on
+        # cfg.post_train_eval.enabled so existing YAMLs without the block are
+        # untouched. Runs linear + kNN (FrozenEvaluator) and attentive
+        # (JepaFinetuner) probes on every saved checkpoint.
+        if self.rank == 0 and self.cfg.get("post_train_eval", {}).get("enabled", False):
+            from .post_train_probes import run_post_train_probes
+            run_post_train_probes(self.cfg, run_dir)
     
     def set_up_gradient_accumulation(self):
         actual_global_batch_size = self.train_cfg.batch_size * self.world_size

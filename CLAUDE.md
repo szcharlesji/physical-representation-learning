@@ -50,6 +50,17 @@ Research code for JEPA-style representation learning on PDE-simulation data from
 - Local dev: no torch in the system Python on this Mac — code only runs on the HPC inside the Singularity image. Use `python3 -m py_compile <file>` to syntax-check.
 - Config overrides via Hydra-style CLI args, e.g. `train.num_epochs=10 dataset.resize_mode=fft`.
 
+## Auto-probe at end of pretraining (`post_train_eval`)
+
+When `cfg.post_train_eval.enabled: true`, `Trainer.train()` iterates every saved `ConvEncoder_*.pth` under the run's checkpoint dir (rank 0 only) and runs each probe listed in `cfg.post_train_eval.probes`. Implementation lives in `physics_jepa/post_train_probes.py`; the hook is at the bottom of `Trainer.train()`.
+
+- **linear / knn** → `FrozenEvaluator` with the `ft` block taken from `cfg.post_train_eval.frozen_config` (currently `configs/train_activematter_frozen.yaml`). `cfg.ft.out_dir` is scoped per-checkpoint (`<out_dir>/<run_dir_name>/<ckpt_stem>/`) so `results.json` doesn't overwrite.
+- **attentive** → `JepaFinetuner` with `use_attentive_pooling=true`, reusing the pretrain cfg's `ft` block (which is already configured as an attentive probe in `train_*_small.yaml`).
+- `cfg.ft.run_name` is nulled for both paths so each checkpoint gets a unique auto-generated W&B run name (`<group>-probe_<type>-<ckpt_stem>`). All probe runs reuse the pretrain `group` via `group_from_checkpoint`, so they cluster together in the UI.
+- The hook pops `LOCAL_RANK`/`RANK`/`WORLD_SIZE` before running probes so `JepaFinetuner`'s `Trainer.__init__` takes the single-GPU branch and doesn't call `ddp_setup()` again.
+
+**Currently wired up only for active_matter**. The `post_train_eval` block only lives in `configs/train_activematter_small.yaml`; shear_flow and rayleigh_benard configs have no block → gate is false → old behavior. Extending to those datasets requires adding matching frozen configs and fixing `FrozenEvaluator.PARAM_NAMES` in [physics_jepa/eval_frozen.py](physics_jepa/eval_frozen.py) (currently hardcoded to active_matter's `["alpha", "zeta"]`).
+
 ## W&B
 
 All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, filter-by-tag.

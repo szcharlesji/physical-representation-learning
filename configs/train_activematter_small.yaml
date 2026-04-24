@@ -47,3 +47,14 @@ ft:
 
 out_path: "./checkpoints"
 cache_path: "./dataset_cache"
+
+# Auto-probe at end of pretraining. Active_matter only for now.
+# Each saved ConvEncoder_*.pth under out_path/<run>/ gets linear + kNN
+# (FrozenEvaluator) and attentive (JepaFinetuner) probes. All three W&B
+# runs per checkpoint join the pretrain run's group so they cluster
+# together in the UI. Set enabled=false (or omit this block) to keep the
+# old pretrain-only flow.
+post_train_eval:
+  enabled: true
+  probes: [linear, knn, attentive]
+  frozen_config: configs/train_activematter_frozen.yaml
