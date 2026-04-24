@@ -16,6 +16,10 @@ dataset:
 
 model:
   objective: "jepa"
+  # `name` feeds both build_tags and the on-disk checkpoint dir (via the
+  # pretrain run_name). Override the preset so the W&B group reflects the
+  # actual backbone.
+  name: "vit3d"
   dims: [16, 32, 64, 128, 384]   # last entry == embed_dim so ConvPredictor sees matching channels
   num_res_blocks: [3, 3, 3, 9, 3]
   backbone: "vit3d"

@@ -68,7 +68,7 @@ All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, 
 - **project**: env `WANDB_PROJECT` → fallback `physics-jepa-baseline`. FFT and other variants are **tags**, not separate projects.
 - **job_type** (how to split probes on the UI): `pretrain` | `probe_linear` | `probe_knn` | `probe_attentive` | `probe_mlp`. `eval_frozen.py` with `eval_mode=linear_and_knn` produces two sequential runs, one per `job_type`.
 - **group**: pretrain uses `f"{run_name}_{timestamp}"` (matches the on-disk checkpoint dir). Probes reuse it via `group_from_checkpoint(cfg.ft.trained_model_path)`, which is `Path(ckpt).parent.name`. Pretrain + all its downstream probes cluster together in the W&B UI.
-- **tags**: `[dataset.name, model.name, resize_mode]` auto-added (`build_tags`). E.g. `fft` or `bilinear` shows up here for filtering.
+- **tags**: `build_tags` emits `[dataset.name, model.name, resize_mode, objective, backbone, regularizer]`. Filter the sidebar by `vit3d`/`conv3d_next`/`conv3d_next_attn` for architecture, or by `vicreg`/`sigreg` for the regularizer. Dedup keeps duplicate strings (e.g. `model.name=vit3d` and `model.backbone=vit3d` both resolve to one `vit3d` tag).
 - **unified probe metric**: every probe path logs `probe/val_mse` (periodic) and sets `summary["probe/best_val_mse"]` so linear/knn/attentive runs overlay directly on a single W&B chart. `eval_frozen` also logs `probe/test_mse_final`. Attentive-probe path (inside `Trainer.training_loop`) only emits these on probe runs (`self.wandb_job_type.startswith("probe_")` and regression task) — pretrain is unaffected.
 
 ## Current branches / experiments

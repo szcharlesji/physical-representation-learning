@@ -17,11 +17,41 @@ JOB_TYPES = ("pretrain", "probe_linear", "probe_knn", "probe_attentive", "probe_
 
 
 def build_tags(cfg, extra: Optional[Iterable[str]] = None) -> list:
+    """Auto-derived tags for filtering in the W&B sidebar.
+
+    Emits: dataset name, model name (from the model preset), resize_mode,
+    objective (jepa|ae|supervised|videomae), backbone
+    (conv3d_next|conv3d_next_attn|vit3d), and regularizer (vicreg|sigreg).
+    Each experiment config thus gets a distinct tag footprint so runs can
+    be sliced by any axis from the UI.
+    """
     tags = []
-    dataset_name = cfg.get("dataset", {}).get("name") if cfg is not None else None
-    model_name = cfg.get("model", {}).get("name") if cfg is not None else None
-    resize_mode = cfg.get("dataset", {}).get("resize_mode", "bilinear") if cfg is not None else None
-    for t in (dataset_name, model_name, resize_mode):
+    if cfg is None:
+        return tags
+
+    ds = cfg.get("dataset", {}) or {}
+    model = cfg.get("model", {}) or {}
+    train = cfg.get("train", {}) or {}
+
+    dataset_name = ds.get("name")
+    model_name = model.get("name")
+    resize_mode = ds.get("resize_mode", "bilinear")
+    objective = model.get("objective")
+
+    # Phase 3: real architecture identifier (the `model.name` from the preset
+    # stays "cnn" even when backbone=vit3d because it's baked into the preset).
+    backbone = model.get("backbone", "conv3d_next")
+
+    # Phase 2: regularizer. Fall back to the legacy `model.loss=gaussian_matching`
+    # alias, otherwise default to vicreg (what unconfigured runs used).
+    regularizer = train.get("regularizer", None)
+    if regularizer is None:
+        if model.get("loss", None) == "gaussian_matching":
+            regularizer = "sigreg"
+        elif objective == "jepa":
+            regularizer = "vicreg"
+
+    for t in (dataset_name, model_name, resize_mode, objective, backbone, regularizer):
         if t:
             tags.append(str(t))
     if extra:
