@@ -9,13 +9,9 @@ num_workers: 4
 run_name: null                     # null -> auto-generated from checkpoint
 
 linear:
-  num_epochs: 100
-  batch_size: 512
-  lr: 1.0e-3
-  weight_decay: 1.0e-4
   bias: true
-  min_lr: 0.0
 
 knn:
   ks: [1, 5, 10, 20, 50]
   metrics: ["euclidean", "cosine"]
+  chunk_size: 1024
