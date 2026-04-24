@@ -22,7 +22,7 @@ from typing import List, Sequence
 import re
 from sklearn.metrics import f1_score
 
-from .data import EmbeddingsDataset, get_dataset_metadata, get_train_dataloader, get_val_dataloader
+from .data import EmbeddingsDataset, get_dataset_metadata, get_train_dataloader, get_val_dataloader, _build_norm_stats_from_cfg
 from .model import get_model_and_loss_cnn, get_autoencoder
 from .utils.data_utils import normalize_labels
 from .utils.model_utils import RegressionHead, RegressionMLP
@@ -218,6 +218,10 @@ class BaseFinetuner(Trainer, ABC):
         return pred, loss_dict
 
     def get_encoder_and_raw_loaders(self):
+        # If pretrain used per-channel normalization, match at probe time so
+        # the frozen encoder sees the same pixel distribution. No-op when
+        # cfg.dataset.normalize is unset (behavior-preserving).
+        norm_stats = _build_norm_stats_from_cfg(self.cfg, rank=self.rank or 0)
         # make new loaders that have larger batch size for calculating embeddings
         self.train_loader = get_train_dataloader(
             self.cfg.dataset.name,
@@ -236,6 +240,7 @@ class BaseFinetuner(Trainer, ABC):
             offset=self.cfg.dataset.get("offset", None),
             noise_std=self.cfg.ft.get("noise_std", 0.0),
             resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
+            norm_stats=norm_stats,
         )
         self.val_loader = get_val_dataloader(
             self.cfg.dataset.name,
@@ -254,6 +259,7 @@ class BaseFinetuner(Trainer, ABC):
             offset=self.cfg.dataset.get("offset", None),
             noise_std=self.cfg.ft.get("noise_std", 0.0),
             resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
+            norm_stats=norm_stats,
         )
         
         encoder = self.load_model()
@@ -491,11 +497,16 @@ class BaseFinetuner(Trainer, ABC):
 # JEPA Finetuner
 class JepaFinetuner(BaseFinetuner):
     def load_model(self):
+        # Pass model_cfg so build_encoder picks the backbone that matches
+        # the pretrain; otherwise a vit3d checkpoint would fail to load
+        # into a ConvEncoder with mismatched state-dict keys.
         encoder, _, _ = get_model_and_loss_cnn(
             self.cfg.model.dims,
             self.cfg.model.num_res_blocks,
             self.cfg.dataset.num_frames,
             in_chans=self.cfg.dataset.num_chans if 'fields' not in self.cfg.ft else len(self.cfg.ft.fields),
+            model_cfg=self.cfg.model,
+            img_size=self.cfg.dataset.get("resolution", None),
         )
         if self.trained_model_path is not None:
             print(f"loading state dict from {self.trained_model_path}", flush=True)

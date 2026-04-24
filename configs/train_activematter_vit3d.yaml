@@ -1,0 +1,69 @@
+defaults:
+  - dataset: active_matter
+  - model: conv_small   # we override the backbone below; keep dims for ConvPredictor init
+  - ft: linear
+
+# ViT3D backbone experiment on active-matter. 3D patch embedding
+# (pt=4, ph=pw=16) over 16-frame 256x256 inputs, 6-block transformer.
+# Uses VICReg by default to isolate the backbone swap as the only change
+# relative to the baseline; switch `train.regularizer` to sigreg to
+# crossproduct with the SIGReg experiment.
+
+dataset:
+  num_frames: 16
+  resize_mode: fft
+  resolution: [256, 256]
+
+model:
+  objective: "jepa"
+  dims: [16, 32, 64, 128, 384]   # last entry == embed_dim so ConvPredictor sees matching channels
+  num_res_blocks: [3, 3, 3, 9, 3]
+  backbone: "vit3d"
+  vit3d:
+    patch_size: [4, 16, 16]      # (pt, ph, pw)  -> T'=4, H'=W'=16 tokens per frame stack
+    embed_dim: 384
+    depth: 6
+    num_heads: 6
+    mlp_ratio: 4.0
+
+train:
+  num_epochs: 30
+  batch_size: 4                  # transformer is heavier than the conv stack; halve batch
+  precision: "bf16"
+  report_every: 100
+  save_every: 2
+  include_labels: false
+  regularizer: "vicreg"
+  sim_coeff: 2
+  std_coeff: 40
+  cov_coeff: 2
+  predict_n_steps: false
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 3
+  min_lr: 1e-6
+  lr: 5e-4
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  noise_std: 1.0
+  run_name: "vit3d-depth6"
+  distributed: true
+
+ft:
+  task: "regression"
+  use_attentive_pooling: true
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 2
+  min_lr: 0
+  lr: 1e-3
+  weight_decay: 0.01
+  noise_std: 1.0
+  run_name: "activematter-vit3d-FT"
+  distributed: false
+
+out_path: "./checkpoints"
+cache_path: "./dataset_cache"
+
+post_train_eval:
+  enabled: true
+  probes: [linear, knn, attentive]
+  frozen_config: configs/train_activematter_frozen.yaml

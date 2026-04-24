@@ -1,0 +1,63 @@
+defaults:
+  - dataset: active_matter
+  - model: conv_small
+  - ft: linear
+
+# conv3d_next + self-attention at the last stage on active-matter.
+# Isolates the attn insertion as the only architectural diff relative to
+# train_activematter_small.yaml.
+
+dataset:
+  num_frames: 16
+  resize_mode: fft
+  resolution: [256, 256]
+
+model:
+  objective: "jepa"
+  dims: [16, 32, 64, 128, 128]
+  num_res_blocks: [3, 3, 3, 9, 3]
+  backbone: "conv3d_next_attn"
+  attn_stages: [4]               # apply attention after the last (2D) stage
+  attn_num_heads: 4
+  attn_mlp_ratio: 4.0
+
+train:
+  num_epochs: 30
+  batch_size: 8
+  precision: "bf16"
+  report_every: 100
+  save_every: 2
+  include_labels: false
+  sim_coeff: 2
+  std_coeff: 40
+  cov_coeff: 2
+  predict_n_steps: false
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 2
+  min_lr: 1e-6
+  lr: 1e-3
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  noise_std: 1.0
+  run_name: "conv3dnext-attn-stage4"
+  distributed: true
+
+ft:
+  task: "regression"
+  use_attentive_pooling: true
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 2
+  min_lr: 0
+  lr: 1e-3
+  weight_decay: 0.01
+  noise_std: 1.0
+  run_name: "activematter-convattn-FT"
+  distributed: false
+
+out_path: "./checkpoints"
+cache_path: "./dataset_cache"
+
+post_train_eval:
+  enabled: true
+  probes: [linear, knn, attentive]
+  frozen_config: configs/train_activematter_frozen.yaml

@@ -15,6 +15,17 @@ import weakref
 from collections import OrderedDict
 
 from physics_jepa.utils.data_utils import fft_resize_2d
+from physics_jepa.utils.aug import AugmentConfig, SampleAugmenter
+from physics_jepa.utils.norm_stats import NormStats, build_norm_stats
+
+# Per-dataset default BCs used to gate the translation augmentation. Users
+# can still override via `augment.periodic_bcs` at the call site; this is
+# only the default when the train config does not specify it.
+_DATASET_PERIODIC_BCS: dict[str, bool] = {
+    "active_matter": True,
+    "shear_flow": True,       # periodic x; y roll on the cropped 256x256 square is a reasonable approx
+    "rayleigh_benard": False, # non-periodic in y (wall-bounded)
+}
 
 class WellDatasetForJEPA(Dataset):
     """
@@ -40,6 +51,9 @@ class WellDatasetForJEPA(Dataset):
         subset_config_path: Optional[str | Path] = None, # path to config file containing subset_indices
         noise_std: float = 0.0, # standard deviation of Gaussian noise to add
         resize_mode: str = "bilinear", # "bilinear" | "fft" | "none"; fft bypasses per-dataset crop
+        # Phase 2 knobs (optional; None = legacy path = behavior-preserving):
+        augment_cfg: Optional[AugmentConfig] = None,
+        norm_stats: Optional[NormStats] = None,
         # HDF5 handle/cache tuning:
         max_open_files: int = 6,
         rdcc_nbytes: int = 512 * 1024**2,
@@ -62,6 +76,20 @@ class WellDatasetForJEPA(Dataset):
         self.noise_std = float(noise_std)
         if self.noise_std > 0:
             print(f"Adding Gaussian noise with std {self.noise_std}", flush=True)
+
+        # Phase 2: augmentations + per-channel normalization.
+        # When augment_cfg is None we follow the legacy `noise_std`-only path.
+        self.augment_cfg = augment_cfg
+        self.augmenter = (
+            SampleAugmenter(augment_cfg)
+            if augment_cfg is not None and not augment_cfg.is_noop()
+            else None
+        )
+        self.norm_stats = norm_stats
+        if self.augmenter is not None:
+            print(f"augmentations enabled: {augment_cfg}", flush=True)
+        if norm_stats is not None and not norm_stats.is_noop():
+            print(f"per-channel normalization enabled ({norm_stats.mode})", flush=True)
 
         # Load subset indices if provided
         self.subset_indices = None
@@ -253,8 +281,20 @@ class WellDatasetForJEPA(Dataset):
                 tgt_t = torch.nn.functional.interpolate(tgt_t, size=self.resolution, mode='bilinear', align_corners=False)
             # resize_mode == "none": leave at native size
 
-        # Add Gaussian noise if specified
-        if self.noise_std > 0:
+        # Phase 2: per-channel normalization (no-op when norm_stats is None
+        # or mode == "none"). Applied *before* augment so aug noise is in
+        # normalized space.
+        if self.norm_stats is not None and not self.norm_stats.is_noop():
+            ctx_t = self.norm_stats.apply(ctx_t)
+            tgt_t = self.norm_stats.apply(tgt_t)
+
+        # Phase 2: augmentations. When augment_cfg is set, it fully replaces
+        # the legacy noise_std path (augment.noise_std is the preferred knob).
+        # Otherwise fall through to the legacy Gaussian-noise-only path so
+        # existing YAMLs reproduce prior behavior byte-identically.
+        if self.augmenter is not None:
+            ctx_t, tgt_t = self.augmenter(ctx_t, tgt_t)
+        elif self.noise_std > 0:
             noise_ctx = torch.randn_like(ctx_t) * self.noise_std
             noise_tgt = torch.randn_like(tgt_t) * self.noise_std
             ctx_t = ctx_t + noise_ctx
@@ -643,6 +683,8 @@ def get_dataset(
     subset_config_path=None,
     noise_std=0.0,
     resize_mode="bilinear",
+    augment_cfg: Optional["AugmentConfig"] = None,
+    norm_stats: Optional["NormStats"] = None,
 ):
 
     if isinstance(resolution, int):
@@ -662,6 +704,8 @@ def get_dataset(
         subset_config_path=subset_config_path,
         noise_std=noise_std,
         resize_mode=resize_mode,
+        augment_cfg=augment_cfg,
+        norm_stats=norm_stats,
     )
 
 def get_dataset_metadata(dataset_name):
@@ -681,7 +725,65 @@ def get_dataset_metadata(dataset_name):
         dataset.metadata.constant_scalar_names = ["zeta", "alpha"] # don't predict L, it's always the same
     return dataset.metadata
 
+def _build_augment_from_cfg(cfg, stage: str) -> Optional[AugmentConfig]:
+    """Return AugmentConfig or None.
+
+    When the stage's `augment` block is absent we return None, which tells
+    the dataset to take the legacy noise_std-only path (behavior-preserving).
+    """
+    stage_cfg = cfg[stage]
+    aug_block = stage_cfg.get("augment", None) if hasattr(stage_cfg, "get") else None
+    if aug_block is None:
+        return None
+    # periodic_bcs default: per-dataset mapping, overridable via the aug block.
+    default_periodic = _DATASET_PERIODIC_BCS.get(cfg.dataset.name, False)
+    periodic = aug_block.get("periodic_bcs", default_periodic) if hasattr(aug_block, "get") else default_periodic
+    return AugmentConfig.from_cfg(aug_block, periodic_bcs=bool(periodic))
+
+
+def _build_norm_stats_from_cfg(cfg, rank: int = 0) -> Optional[NormStats]:
+    """Return NormStats or None for dataset.normalize in {none,per_channel_zscore}."""
+    mode = cfg.dataset.get("normalize", None)
+    if mode is None or str(mode) == "none":
+        return None
+    resolution = cfg.dataset.get("resolution", None)
+    resize_mode = cfg.dataset.get("resize_mode", "bilinear")
+    num_frames = cfg.dataset.num_frames
+    cache_dir = cfg.get("cache_path", "./dataset_cache")
+    max_samples = int(cfg.dataset.get("normalize_samples", 256))
+
+    def _factory():
+        # Build an un-normalized, un-augmented train dataset purely for
+        # computing stats. noise_std=0, augment=None, norm_stats=None.
+        return get_dataset(
+            cfg.dataset.name,
+            cfg.dataset.num_frames,
+            split="train",
+            resolution=resolution,
+            offset=cfg.dataset.get("offset", None),
+            subset_config_path=cfg.dataset.get("subset_config_path", None),
+            noise_std=0.0,
+            resize_mode=resize_mode,
+            augment_cfg=None,
+            norm_stats=None,
+        )
+
+    return build_norm_stats(
+        mode=str(mode),
+        dataset_factory=_factory,
+        dataset_name=cfg.dataset.name,
+        resolution=resolution,
+        resize_mode=resize_mode,
+        num_frames=num_frames,
+        cache_dir=cache_dir,
+        max_samples=max_samples,
+        rank=int(rank or 0),
+    )
+
+
 def get_train_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None):
+    augment_cfg = _build_augment_from_cfg(cfg, stage)
+    norm_stats = _build_norm_stats_from_cfg(cfg, rank=rank or 0)
     return get_train_dataloader(
         cfg.dataset.name,
         cfg.dataset.num_frames,
@@ -700,9 +802,13 @@ def get_train_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None
         subset_config_path=cfg.dataset.get("subset_config_path", None),
         noise_std=cfg[stage].get("noise_std", 0.0),
         resize_mode=cfg.dataset.get("resize_mode", "bilinear"),
+        augment_cfg=augment_cfg,
+        norm_stats=norm_stats,
     )
 
 def get_val_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None):
+    augment_cfg = _build_augment_from_cfg(cfg, stage)
+    norm_stats = _build_norm_stats_from_cfg(cfg, rank=rank or 0)
     return get_val_dataloader(
         cfg.dataset.name,
         cfg.dataset.num_frames,
@@ -720,6 +826,8 @@ def get_val_dataloader_from_cfg(cfg, stage="train", rank=None, world_size=None):
         offset=cfg.dataset.get("offset", None),
         noise_std=cfg[stage].get("noise_std", 0.0),
         resize_mode=cfg.dataset.get("resize_mode", "bilinear"),
+        augment_cfg=augment_cfg,
+        norm_stats=norm_stats,
     )
 
 def get_train_dataloader(
@@ -746,6 +854,8 @@ def get_train_dataloader(
         subset_config_path=None,
         noise_std=0.0,
         resize_mode="bilinear",
+        augment_cfg: Optional["AugmentConfig"] = None,
+        norm_stats: Optional["NormStats"] = None,
     ):
     dataset = get_dataset(dataset_name,
                           num_frames,
@@ -762,6 +872,8 @@ def get_train_dataloader(
                           subset_config_path=subset_config_path,
                           noise_std=noise_std,
                           resize_mode=resize_mode,
+                          augment_cfg=augment_cfg,
+                          norm_stats=norm_stats,
                         )
     if rank == 0:
         print(f"total number of block pairs in train dataset: {len(dataset)}")
@@ -821,6 +933,8 @@ def get_val_dataloader(
         offset=None,
         noise_std=0.0,
         resize_mode="bilinear",
+        augment_cfg: Optional["AugmentConfig"] = None,
+        norm_stats: Optional["NormStats"] = None,
     ):
     dataset = get_dataset(dataset_name,
                           num_frames,
@@ -836,6 +950,8 @@ def get_val_dataloader(
                           offset=offset,
                           noise_std=noise_std,
                           resize_mode=resize_mode,
+                          augment_cfg=augment_cfg,
+                          norm_stats=norm_stats,
                         )
     if world_size == 1:
         sampler = None

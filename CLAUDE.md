@@ -75,6 +75,54 @@ All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, 
 
 - `try-fft` — FFT-based resize replacing the per-dataset crop. All three train configs set `resize_mode: fft` and explicit `resolution: [H, W]`. Checkpoints land in `checkpoints_fft/` via `pretrain_fft.sbatch` + `WANDB_PROJECT=physics-jepa-fft`. When evaluating FFT checkpoints, the eval configs must match (`resize_mode: fft` + matching resolution) — the eval paths now honor `resize_mode`, but `eval.sbatch` points at `train_activematter_frozen.yaml` which is still at 224/bilinear and needs matching FFT overrides if used against an FFT checkpoint.
 
+## Phase 2/3 config axes
+
+All Phase 2/3 knobs are opt-in: omitting them reproduces the pre-phase behavior byte-for-byte. The active_matter baseline config (`train_activematter_small.yaml`) does **not** use any of these, so existing runs are unchanged. Three new configs demonstrate each axis in isolation:
+
+- `configs/train_activematter_sigreg.yaml` — `train.regularizer: sigreg` (LeWM-style; `sim_coeff*MSE + bcs_coeff*SIGReg`, defaults `bcs_coeff=0.1, num_slices=1024`)
+- `configs/train_activematter_vit3d.yaml` — `model.backbone: vit3d` (3D patch embed + transformer stack; output reshaped to 4D so ConvPredictor still works)
+- `configs/train_activematter_convattn.yaml` — `model.backbone: conv3d_next_attn` + `attn_stages: [4]` (self-attention after the last conv stage)
+
+Launch via `sbatch pretrain_experiment.sbatch {sigreg|vit3d|convattn|baseline}`.
+
+### Regularizer (`train.regularizer`)
+
+Single switch in [physics_jepa/train.py](physics_jepa/train.py) `get_model_components`:
+- `vicreg` (default) — unchanged `vicreg_loss_3d` path.
+- `sigreg` — uses `vicreg_loss_bcs` (sim * MSE + bcs * SIGReg projections/Epps-Pulley). Legacy alias: `model.loss: gaussian_matching`.
+
+### Optimizer (`train.optim`)
+
+`build_optimizer` in [physics_jepa/utils/model_utils.py](physics_jepa/utils/model_utils.py) reads:
+- `optim.name: adamw | lion` (default `adamw`; `lion` requires `lion-pytorch`).
+- `optim.betas: [b1, b2]` (default `[0.9, 0.95]` for adamw, `[0.9, 0.99]` for lion).
+Also exposes `train.grad_clip_norm` (default None → no clipping) and new LR schedulers `linear` / `constant` alongside `cosine`.
+
+### Data / preprocessing
+
+- `dataset.normalize: none | per_channel_zscore` (default `none`). Stats cached at `cache_path/norm_stats_<dataset>_<sha>.pt`. When set, probes (`eval_frozen.py`, `finetuner.py` raw loaders) automatically apply the same stats so the frozen encoder sees matched inputs.
+- `train.augment` (and `ft.augment`) block, handled by `physics_jepa/utils/aug.py::SampleAugmenter`. Supported knobs:
+  - `noise_std` (preferred over the bare `train.noise_std` when augment block is present)
+  - `channel_dropout_p`
+  - `rotations: [0, 90, 180, 270]` subset (uniform sample)
+  - `reflections: true|false`
+  - `translations_px: int` (gated by `periodic_bcs`; per-dataset default in `_DATASET_PERIODIC_BCS` at [physics_jepa/data.py](physics_jepa/data.py): active_matter=true, shear_flow=true, rayleigh_benard=false).
+  All geometric/channel transforms are drawn once per sample and applied identically to ctx and tgt. Noise is drawn independently per side.
+- If the `augment` block is absent, the dataset falls through to the legacy `noise_std`-only path so existing YAMLs are byte-identical.
+
+### Encoder backbones (`model.backbone`)
+
+Selected by `build_encoder` in [physics_jepa/model.py](physics_jepa/model.py):
+- `conv3d_next` (default; omitting the key gives this) — unchanged `ConvEncoder`.
+- `conv3d_next_attn` — same `ConvEncoder` with `attn_stages: [idx, ...]` inserting a transformer `Block` after the ResidualBlock stack at each listed stage. `attn_stages=[]` is structurally identical to `conv3d_next`.
+- `vit3d` — new `ViT3DEncoder` (3D patch embed → N transformer blocks → time-collapsed (B, D, H', W') output). Config under `model.vit3d` (patch_size, embed_dim, depth, num_heads, mlp_ratio). Note: `model.dims[-1]` should equal the ViT `embed_dim` so `ConvPredictor(dims=reversed(encoder.dims)[:2])` receives matching channels.
+
+### Out-of-scope / future
+
+- `model.{patch_size, strides, norm}` knobs for `conv3d_next` are not wired (requires deeper refactor); only `attn_stages` is exposed in Phase 3.
+- `train.early_stop.enabled` is scaffolded but raises `NotImplementedError` until Phase 4.
+- Probe auto-run still active_matter only; `FrozenEvaluator.PARAM_NAMES` remains hardcoded to `["alpha", "zeta"]`.
+
 ## Editing etiquette
 
 - Don't edit `configs/dataset/*.yaml` for experiment-level changes — those are defaults consumed by FT/eval/baselines too. Override in the experiment's train config instead.

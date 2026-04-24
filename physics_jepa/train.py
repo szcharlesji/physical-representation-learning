@@ -18,7 +18,7 @@ import gc
 
 from .data import get_train_dataloader_from_cfg, get_val_dataloader_from_cfg, get_dataset_metadata
 from .model import get_model_and_loss_cnn, get_autoencoder
-from .utils.model_utils import CosineLRScheduler
+from .utils.model_utils import CosineLRScheduler, build_lr_scheduler, build_optimizer
 from .utils.data_utils import mae
 from .utils.hydra import compose
 from .utils.misc import distprint
@@ -64,15 +64,15 @@ class Trainer:
             distprint(f"Loaded {len(self.train_loader)} training batches per device on {self.world_size} devices, batch size {self.train_cfg.batch_size}", local_rank=self.rank)
 
         model_components, loss_fn = self.get_model_components()
-        
-        # Get weight decay from config, default to 0.05 if not specified
-        weight_decay = self.train_cfg.get("weight_decay", 0.05)
-        
-        optimizer = torch.optim.AdamW(
-            [p for component in model_components for p in list(component.parameters())], 
-            lr=self.train_cfg.lr,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.95)
+
+        # build_optimizer defaults to AdamW(lr, weight_decay|0.05, betas=(0.9,0.95))
+        # so omitting train.optim reproduces the prior behavior exactly.
+        params = [p for component in model_components for p in list(component.parameters())]
+        optimizer = build_optimizer(params, self.train_cfg)
+        distprint(
+            f"optimizer: {type(optimizer).__name__} lr={self.train_cfg.lr} "
+            f"wd={self.train_cfg.get('weight_decay', 0.05)}",
+            local_rank=self.rank,
         )
 
         run_name = f"{self.cfg.dataset.name}-{self.cfg.dataset.num_frames}frames-{self.cfg.model.name}-{self.cfg.model.objective}"
@@ -123,29 +123,53 @@ class Trainer:
 
         steps = self.train_cfg.num_epochs * self.train_cfg.steps if 'steps' in self.train_cfg else self.train_cfg.num_epochs * len(self.train_loader)
 
-        # Setup cosine LR scheduler with warmup
-        if self.train_cfg.get("lr_scheduler", None) == "cosine":
+        # Setup LR scheduler. Supports cosine (default when "cosine" is set),
+        # linear, and constant. Any other value (including None) = no scheduler,
+        # preserving prior behavior for configs that don't opt in.
+        sched_name = self.train_cfg.get("lr_scheduler", None)
+        if sched_name is None:
+            lr_scheduler = None
+        else:
             max_lr = self.train_cfg.get("lr", self.train_cfg.lr)
             min_lr = self.train_cfg.get("min_lr", 1e-6)
-            warmup_steps_from_epochs = self.train_cfg.get("lr_scheduler_warmup_epochs", 0) * len(self.train_loader) if isinstance(self.train_loader.dataset, IterableDataset) else 0
+            # IterableDataset has no __len__; warmup-from-epochs is undefined there,
+            # so fall back to 0 (preserves existing behavior path).
+            if isinstance(self.train_loader.dataset, IterableDataset):
+                warmup_steps_from_epochs = 0
+            else:
+                warmup_steps_from_epochs = self.train_cfg.get("lr_scheduler_warmup_epochs", 0) * len(self.train_loader)
             warmup_steps = max(self.train_cfg.get("lr_scheduler_warmup_steps", 0), warmup_steps_from_epochs)
             warmup_updates = (warmup_steps + grad_accum_steps - 1) // grad_accum_steps
             total_updates = (steps + grad_accum_steps - 1) // grad_accum_steps
-            
-            distprint(f"using cosine scheduler with max_lr {max_lr}, min_lr {min_lr}, warmup_steps {warmup_updates}, total_updates {total_updates}", local_rank=self.rank)
 
-            # Use the existing cosine_scheduler function
-            lr_scheduler = CosineLRScheduler(
+            distprint(
+                f"using {sched_name} scheduler: max_lr={max_lr}, min_lr={min_lr}, "
+                f"warmup_steps={warmup_updates}, total_updates={total_updates}",
+                local_rank=self.rank,
+            )
+            lr_scheduler = build_lr_scheduler(
                 optimizer,
-                step=self.train_cfg.get("start_step", 0) // grad_accum_steps,
+                name=sched_name,
                 base_value=max_lr,
                 final_value=min_lr,
                 steps=total_updates,
                 warmup_steps=warmup_updates,
-                start_warmup_value=min_lr
+                start_warmup_value=min_lr,
+                start_step=self.train_cfg.get("start_step", 0) // grad_accum_steps,
             )
-        else:
-            lr_scheduler = None
+
+        # Grad-clip: default None = no clipping (matches prior behavior).
+        grad_clip_norm = self.train_cfg.get("grad_clip_norm", None)
+        if grad_clip_norm is not None:
+            distprint(f"grad_clip_norm={grad_clip_norm}", local_rank=self.rank)
+
+        # Early-stop scaffold: not yet implemented (needs periodic in-training
+        # probe). Reject an opt-in flag so silent no-ops don't confuse users.
+        if self.train_cfg.get("early_stop", {}).get("enabled", False):
+            raise NotImplementedError(
+                "train.early_stop.enabled is scaffolded but not implemented; "
+                "disable it or wait for Phase 4."
+            )
 
         if not self.is_iterable_dataset:
             distprint(f"starting to train w/ {len(self.train_loader)} batches per device", local_rank=self.rank)
@@ -185,6 +209,10 @@ class Trainer:
                 loss.backward()
 
                 if i % grad_accum_steps == 0:
+                    if grad_clip_norm is not None:
+                        # clip across all trainable params in all model components
+                        all_params = [p for c in model_components for p in c.parameters() if p.requires_grad]
+                        torch.nn.utils.clip_grad_norm_(all_params, float(grad_clip_norm))
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
 
@@ -331,6 +359,10 @@ class Trainer:
 
     def get_model_components(self):
         if self.cfg.model.objective == 'jepa':
+            # Phase 3: pass model_cfg so build_encoder picks up backbone switch
+            # (conv3d_next | conv3d_next_attn | vit3d). When model.backbone is
+            # missing, build_encoder falls back to the original ConvEncoder
+            # construction - byte-identical to the previous behavior.
             encoder, predictor, loss_fn = get_model_and_loss_cnn(
                 self.cfg.model.dims,
                 self.cfg.model.num_res_blocks,
@@ -339,6 +371,8 @@ class Trainer:
                 sim_coeff=self.train_cfg.sim_coeff,
                 std_coeff=self.train_cfg.std_coeff,
                 cov_coeff=self.train_cfg.cov_coeff,
+                model_cfg=self.cfg.model,
+                img_size=self.cfg.dataset.get("resolution", None),
             )
 
             if 'encoder_path' in self.train_cfg and self.train_cfg.encoder_path is not None:
@@ -399,10 +433,36 @@ class Trainer:
         else:
             raise ValueError(f"Invalid model objective: {self.cfg.model.objective}")
         
-        if 'loss' in self.cfg.model and self.cfg.model.loss == 'gaussian_matching':
+        # Regularizer switch. Order of precedence:
+        #   1. train.regularizer: vicreg | sigreg  (preferred)
+        #   2. legacy model.loss: gaussian_matching (alias for sigreg)
+        # Both default to vicreg so existing YAMLs reproduce prior behavior.
+        regularizer = self.train_cfg.get("regularizer", None)
+        if regularizer is None:
+            if 'loss' in self.cfg.model and self.cfg.model.loss == 'gaussian_matching':
+                regularizer = "sigreg"
+            else:
+                regularizer = "vicreg"
+        if regularizer == "sigreg":
+            # paper defaults: lambda=0.1, M=1024 (LeWM paper); here sim*MSE + bcs*SIGReg.
             from .model import vicreg_loss_bcs
             from functools import partial
-            loss_fn = partial(vicreg_loss_bcs, sim_coeff=self.train_cfg.sim_coeff, bcs_coeff=self.train_cfg.bcs_coeff, num_slices=self.train_cfg.num_slices)
+            loss_fn = partial(
+                vicreg_loss_bcs,
+                sim_coeff=self.train_cfg.sim_coeff,
+                bcs_coeff=self.train_cfg.get("bcs_coeff", 0.1),
+                num_slices=self.train_cfg.get("num_slices", 1024),
+            )
+            distprint(
+                f"regularizer=sigreg (sim={self.train_cfg.sim_coeff}, "
+                f"bcs={self.train_cfg.get('bcs_coeff', 0.1)}, "
+                f"num_slices={self.train_cfg.get('num_slices', 1024)})",
+                local_rank=self.rank,
+            )
+        elif regularizer == "vicreg":
+            distprint("regularizer=vicreg (default)", local_rank=self.rank)
+        else:
+            raise ValueError(f"unknown train.regularizer: {regularizer!r}; expected vicreg|sigreg")
 
         if self.world_size > 1:
             for component in model_components:

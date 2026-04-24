@@ -6,22 +6,79 @@ from functools import partial
 from einops import rearrange
 from collections import defaultdict
 
-from physics_jepa.utils.model_utils import ConvEncoder, ConvPredictor, ConvDecoder
+from physics_jepa.utils.model_utils import ConvEncoder, ConvPredictor, ConvDecoder, ViT3DEncoder
 
-def get_model_and_loss_cnn(dims, num_res_blocks, num_frames, in_chans=2, sim_coeff=25, std_coeff=25, cov_coeff=1):
-    encoder = ConvEncoder(
-        dims=dims,
-        in_chans=in_chans,
-        num_res_blocks=num_res_blocks,
-        num_frames=num_frames,
-    )
+
+def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
+    """Factory for the pretrain encoder selected by `model_cfg.backbone`.
+
+    Defaults to `conv3d_next` when the key is missing, reproducing the
+    pre-Phase-3 behavior exactly. `conv3d_next_attn` inserts self-attention
+    at the stage indices in `model_cfg.attn_stages` (empty -> identical to
+    conv3d_next). `vit3d` swaps in the ViT3DEncoder.
+    """
+    backbone = None
+    if hasattr(model_cfg, "get"):
+        backbone = model_cfg.get("backbone", None)
+    backbone = str(backbone or "conv3d_next").lower()
+
+    if backbone in ("conv3d_next", "conv3d_next_attn"):
+        attn_stages = list(model_cfg.get("attn_stages", []) or []) if backbone == "conv3d_next_attn" else []
+        encoder = ConvEncoder(
+            dims=list(model_cfg.dims),
+            in_chans=in_chans,
+            num_res_blocks=list(model_cfg.num_res_blocks),
+            num_frames=num_frames,
+            attn_stages=attn_stages,
+            attn_num_heads=int(model_cfg.get("attn_num_heads", 4)),
+            attn_mlp_ratio=float(model_cfg.get("attn_mlp_ratio", 4.0)),
+        )
+        return encoder
+
+    if backbone == "vit3d":
+        vit_cfg = model_cfg.get("vit3d", {}) if hasattr(model_cfg, "get") else {}
+        vit_cfg = vit_cfg or {}
+        if img_size is None:
+            img_size = 256
+        patch = list(vit_cfg.get("patch_size", [4, 16, 16]))
+        encoder = ViT3DEncoder(
+            in_chans=in_chans,
+            num_frames=num_frames,
+            img_size=img_size,
+            patch_size=tuple(patch),
+            embed_dim=int(vit_cfg.get("embed_dim", model_cfg.dims[-1] if hasattr(model_cfg, "dims") else 384)),
+            depth=int(vit_cfg.get("depth", 6)),
+            num_heads=int(vit_cfg.get("num_heads", 6)),
+            mlp_ratio=float(vit_cfg.get("mlp_ratio", 4.0)),
+        )
+        return encoder
+
+    raise ValueError(f"unknown model.backbone: {backbone!r}; expected conv3d_next|conv3d_next_attn|vit3d")
+
+
+def get_model_and_loss_cnn(dims, num_res_blocks, num_frames, in_chans=2, sim_coeff=25, std_coeff=25, cov_coeff=1,
+                           model_cfg=None, img_size=None):
+    """Build (encoder, predictor, loss) tuple.
+
+    Backwards-compatible: when `model_cfg` is not passed, falls back to the
+    original ConvEncoder construction using the positional `dims` /
+    `num_res_blocks` / `num_frames`.
+    """
+    if model_cfg is not None:
+        encoder = build_encoder(model_cfg, num_frames=num_frames, in_chans=in_chans, img_size=img_size)
+    else:
+        encoder = ConvEncoder(
+            dims=dims,
+            in_chans=in_chans,
+            num_res_blocks=num_res_blocks,
+            num_frames=num_frames,
+        )
     loss = partial(vicreg_loss_3d,
                 sim_coeff=sim_coeff,
                 std_coeff=std_coeff,
                 cov_coeff=cov_coeff,
                 n_chunks=5)
     predictor = ConvPredictor(dims=list(reversed(encoder.dims))[:2])
-    
     return encoder, predictor, loss
 
 def vicreg_loss_3d(

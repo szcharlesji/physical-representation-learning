@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .data import get_dataset
+from .data import get_dataset, _build_norm_stats_from_cfg
 from .model import get_model_and_loss_cnn
 from .utils.hydra import compose
 from .utils.wandb_utils import init_run as wandb_init_run, group_from_checkpoint
@@ -46,11 +46,16 @@ class FrozenEvaluator:
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def load_encoder(self) -> nn.Module:
+        # Pass model_cfg so build_encoder picks the backbone that matches
+        # the pretrain (conv3d_next|conv3d_next_attn|vit3d). Without this a
+        # vit3d checkpoint would try to load into a ConvEncoder and fail.
         encoder, _, _ = get_model_and_loss_cnn(
             self.cfg.model.dims,
             self.cfg.model.num_res_blocks,
             self.cfg.dataset.num_frames,
             in_chans=self.cfg.dataset.num_chans,
+            model_cfg=self.cfg.model,
+            img_size=self.cfg.dataset.get("resolution", None),
         )
         print(f"loading encoder state dict from {self.checkpoint_path}", flush=True)
         state_dict = torch.load(self.checkpoint_path, map_location="cpu")
@@ -76,6 +81,10 @@ class FrozenEvaluator:
         return hashlib.sha1(s.encode()).hexdigest()[:16]
 
     def _make_loader(self, split: str) -> DataLoader:
+        # If the pretrain used per-channel normalization, apply the same
+        # stats at eval time so the frozen encoder sees matched inputs.
+        # Returns None when cfg.dataset.normalize is unset → no-op.
+        norm_stats = _build_norm_stats_from_cfg(self.cfg, rank=0)
         dataset = get_dataset(
             self.cfg.dataset.name,
             self.cfg.dataset.num_frames,
@@ -85,6 +94,8 @@ class FrozenEvaluator:
             offset=self.cfg.dataset.get("offset", None),
             noise_std=0.0,
             resize_mode=self.cfg.dataset.get("resize_mode", "bilinear"),
+            augment_cfg=None,  # no augmentation at eval
+            norm_stats=norm_stats,
         )
         return DataLoader(
             dataset,
