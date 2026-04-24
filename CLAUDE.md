@@ -61,6 +61,14 @@ When `cfg.post_train_eval.enabled: true`, `Trainer.train()` iterates every saved
 
 **Currently wired up only for active_matter**. The `post_train_eval` block only lives in `configs/train_activematter_small.yaml`; shear_flow and rayleigh_benard configs have no block → gate is false → old behavior. Extending to those datasets requires adding matching frozen configs and fixing `FrozenEvaluator.PARAM_NAMES` in [physics_jepa/eval_frozen.py](physics_jepa/eval_frozen.py) (currently hardcoded to active_matter's `["alpha", "zeta"]`).
 
+### Per-checkpoint live probes (`post_train_eval.on_save`)
+
+When `post_train_eval.on_save: true`, `Trainer` launches a probe subprocess right after every checkpoint write (both the `save_every` epoch path and the `save_every_steps` path). The subprocess reads the run's already-written `config.yaml` via `OmegaConf.load`, so the training process's wandb run + DDP state stay untouched.
+
+- `on_save_probes` (optional) narrows which probes run per save (e.g. `[linear, knn]` to skip the expensive attentive probe); defaults to the full `probes` list.
+- `on_save_blocking: true` (default) makes training wait for each probe to finish before resuming — GPU is shared serially. Set false to fire-and-forget via `subprocess.Popen` if you have spare GPU headroom.
+- CLI entrypoint: `python -m physics_jepa.post_train_probes --config <run>/config.yaml --checkpoint <ckpt> [--probes linear knn attentive]`.
+
 ## W&B
 
 All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, filter-by-tag.

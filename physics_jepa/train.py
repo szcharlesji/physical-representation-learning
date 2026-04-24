@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 from collections import defaultdict
 import datetime
 import gc
+from typing import Optional
 
 from .data import get_train_dataloader_from_cfg, get_val_dataloader_from_cfg, get_dataset_metadata
 from .model import get_model_and_loss_cnn, get_autoencoder
@@ -250,9 +251,14 @@ class Trainer:
                             out_path.mkdir(parents=True)
                             cfg_path = out_path / f"config.yaml"
                             OmegaConf.save(self.cfg, cfg_path)
+                        encoder_ckpt_name: Optional[str] = None
                         for component in model_components:
-                            torch.save(component.state_dict(), out_path / f"{component.__class__.__name__}_step{i}.pth")
+                            fname = f"{component.__class__.__name__}_step{i}.pth"
+                            torch.save(component.state_dict(), out_path / fname)
+                            if encoder_ckpt_name is None:
+                                encoder_ckpt_name = fname
                         print(f"checkpoint at step {i} saved to {out_path}")
+                        self._maybe_launch_on_save_probes(out_path, encoder_ckpt_name)
 
                 if self.train_cfg.get("steps", None) is not None and i > self.train_cfg.steps:
                     break
@@ -269,8 +275,13 @@ class Trainer:
                     out_path.mkdir(parents=True)
                     cfg_path = out_path / f"config.yaml"
                     OmegaConf.save(self.cfg, cfg_path)
+                encoder_ckpt_name: Optional[str] = None
                 for i, component in enumerate(model_components):
-                    torch.save(component.state_dict(), out_path / f"{component.__class__.__name__}_{epoch}.pth")
+                    fname = f"{component.__class__.__name__}_{epoch}.pth"
+                    torch.save(component.state_dict(), out_path / fname)
+                    if encoder_ckpt_name is None:
+                        encoder_ckpt_name = fname
+                self._maybe_launch_on_save_probes(out_path, encoder_ckpt_name)
 
         distprint(f"all checkpoints saved to {out_path}", local_rank=self.rank)
 
@@ -473,6 +484,48 @@ class Trainer:
                 component = component.to(self.rank)
 
         return model_components, loss_fn
+
+    def _maybe_launch_on_save_probes(self, out_path, ckpt_filename: str) -> None:
+        """Fire probes in a subprocess right after a checkpoint is written.
+
+        Isolates wandb + DDP state from the training process so the live
+        pretrain run keeps logging while the probes produce their own runs.
+        No-op unless `cfg.post_train_eval.on_save` is true.
+        """
+        post = self.cfg.get("post_train_eval", {}) or {}
+        if not post.get("enabled", False) or not post.get("on_save", False):
+            return
+        if self.rank != 0:
+            return
+
+        import subprocess
+        import sys as _sys
+
+        config_path = str(out_path / "config.yaml")
+        ckpt_path = str(out_path / ckpt_filename)
+        blocking = bool(post.get("on_save_blocking", True))
+        probes = list(post.get("on_save_probes", post.get("probes", ["linear", "knn", "attentive"])))
+
+        cmd = [_sys.executable, "-m", "physics_jepa.post_train_probes",
+               "--config", config_path, "--checkpoint", ckpt_path,
+               "--probes", *probes]
+        distprint(
+            f"[on_save] launching probes on {ckpt_filename} "
+            f"(blocking={blocking}, probes={probes})",
+            local_rank=self.rank,
+        )
+        if blocking:
+            # Free cached activations so the subprocess has room for its own
+            # encoder copy on the same GPU.
+            torch.cuda.empty_cache()
+            result = subprocess.run(cmd, check=False)
+            if result.returncode != 0:
+                distprint(
+                    f"[on_save] probe subprocess exited with code {result.returncode}",
+                    local_rank=self.rank,
+                )
+        else:
+            subprocess.Popen(cmd)
 
     def time_to_completion(self, start_time, i, total_steps):
         steps_per_sec = (i + 1) / (datetime.datetime.now() - start_time).total_seconds()

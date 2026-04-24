@@ -32,22 +32,26 @@ def _maybe_wandb_finish() -> None:
 
 
 def find_checkpoints(run_dir: Path) -> List[Path]:
-    """Return sorted list of ConvEncoder_*.pth under run_dir.
+    """Return sorted list of <Encoder>_*.pth under run_dir.
 
-    Sort order: step-checkpoints first (by step), then epoch-checkpoints
-    (by epoch). Anything else falls to the end lexicographically.
+    Matches any encoder class name (ConvEncoder, ViT3DEncoder, ...) emitted
+    by Trainer.training_loop's save code. Sort order: step-checkpoints
+    first (by step), then epoch-checkpoints (by epoch).
     """
     run_dir = Path(run_dir)
     if not run_dir.exists():
         return []
-    ckpts = list(run_dir.glob("ConvEncoder_*.pth"))
+    # The training loop saves predictor checkpoints alongside the encoder
+    # using the same `<ClassName>_<tag>.pth` scheme; only the encoder is
+    # useful for probes, so we filter on class names that end in "Encoder".
+    ckpts = [p for p in run_dir.glob("*Encoder_*.pth")]
 
     def _sort_key(p: Path):
         stem = p.stem
-        m = re.match(r"^ConvEncoder_step(\d+)$", stem)
+        m = re.match(r"^[A-Za-z0-9]+Encoder_step(\d+)$", stem)
         if m:
             return (0, int(m.group(1)), stem)
-        m = re.match(r"^ConvEncoder_(\d+)$", stem)
+        m = re.match(r"^[A-Za-z0-9]+Encoder_(\d+)$", stem)
         if m:
             return (1, int(m.group(1)), stem)
         return (2, 0, stem)
@@ -131,21 +135,85 @@ def run_attentive_probe(pretrain_cfg: DictConfig, ckpt_path: str) -> None:
     _maybe_wandb_finish()
 
 
+def _frozen_mode_for(probes: Sequence[str]) -> Optional[str]:
+    """Map a probe list to FrozenEvaluator's `eval_mode` string (or None)."""
+    s = set(probes)
+    if {"linear", "knn"} <= s:
+        return "linear_and_knn"
+    if "linear" in s:
+        return "linear"
+    if "knn" in s:
+        return "knn"
+    return None
+
+
+def run_probes_on_checkpoint(
+    pretrain_cfg: DictConfig,
+    ckpt_path: Path | str,
+    probes: Optional[Sequence[str]] = None,
+) -> None:
+    """Run the configured probes on a single checkpoint.
+
+    `probes` defaults to `cfg.post_train_eval.probes`. Each probe is wrapped
+    in try/except + wandb.finish() so one failure doesn't abort the rest.
+    """
+    post = pretrain_cfg.get("post_train_eval", None) or {}
+    if not post.get("enabled", False):
+        return
+
+    probes = list(probes if probes is not None else post.get("probes", ["linear", "knn", "attentive"]))
+    frozen_cfg: Optional[str] = post.get("frozen_config", None)
+    frozen_mode = _frozen_mode_for(probes)
+    want_frozen = frozen_mode is not None
+    want_attentive = "attentive" in probes
+
+    ckpt = Path(ckpt_path)
+    ckpt_str = str(ckpt)
+
+    if want_frozen:
+        if frozen_cfg is None:
+            print(
+                "[post_train_eval] linear/knn requested but "
+                "post_train_eval.frozen_config not set; skipping",
+                flush=True,
+            )
+        else:
+            print(f"[post_train_eval] {frozen_mode} probe on {ckpt.name}", flush=True)
+            try:
+                run_frozen_probes(pretrain_cfg, ckpt_str, frozen_cfg, eval_mode=frozen_mode)
+            except Exception as e:
+                print(
+                    f"[post_train_eval] frozen probes failed on {ckpt.name}: {e}",
+                    flush=True,
+                )
+                _maybe_wandb_finish()
+
+    if want_attentive:
+        print(f"[post_train_eval] attentive probe on {ckpt.name}", flush=True)
+        try:
+            run_attentive_probe(pretrain_cfg, ckpt_str)
+        except Exception as e:
+            print(
+                f"[post_train_eval] attentive probe failed on {ckpt.name}: {e}",
+                flush=True,
+            )
+            _maybe_wandb_finish()
+
+
 def run_post_train_probes(
     pretrain_cfg: DictConfig,
     run_dir: Path | str,
 ) -> None:
     """Entry point called from Trainer.train() on rank 0 after pretraining.
 
-    Iterates every saved checkpoint under `run_dir` and runs the probes
-    listed in `cfg.post_train_eval.probes` (default linear+knn+attentive).
+    Iterates every saved checkpoint under `run_dir` and delegates to
+    `run_probes_on_checkpoint` for each.
     """
     post = pretrain_cfg.get("post_train_eval", None)
     if post is None or not post.get("enabled", False):
         return
 
     probes: Sequence[str] = list(post.get("probes", ["linear", "knn", "attentive"]))
-    frozen_cfg: Optional[str] = post.get("frozen_config", None)
 
     ckpts = find_checkpoints(Path(run_dir))
     if not ckpts:
@@ -154,19 +222,6 @@ def run_post_train_probes(
             flush=True,
         )
         return
-
-    want_frozen = bool({"linear", "knn"} & set(probes))
-    want_attentive = "attentive" in probes
-
-    # linear_and_knn when both requested; otherwise run whichever the user asked for.
-    if {"linear", "knn"} <= set(probes):
-        frozen_mode = "linear_and_knn"
-    elif "linear" in probes:
-        frozen_mode = "linear"
-    elif "knn" in probes:
-        frozen_mode = "knn"
-    else:
-        frozen_mode = None
 
     _clear_dist_env()
 
@@ -177,33 +232,38 @@ def run_post_train_probes(
     )
 
     for ckpt in ckpts:
-        ckpt_str = str(ckpt)
-        if want_frozen:
-            if frozen_cfg is None:
-                print(
-                    "[post_train_eval] linear/knn requested but "
-                    "post_train_eval.frozen_config not set; skipping",
-                    flush=True,
-                )
-            else:
-                print(f"[post_train_eval] {frozen_mode} probe on {ckpt.name}", flush=True)
-                try:
-                    run_frozen_probes(pretrain_cfg, ckpt_str, frozen_cfg, eval_mode=frozen_mode)
-                except Exception as e:
-                    print(
-                        f"[post_train_eval] frozen probes failed on {ckpt.name}: {e}",
-                        flush=True,
-                    )
-                    _maybe_wandb_finish()
-        if want_attentive:
-            print(f"[post_train_eval] attentive probe on {ckpt.name}", flush=True)
-            try:
-                run_attentive_probe(pretrain_cfg, ckpt_str)
-            except Exception as e:
-                print(
-                    f"[post_train_eval] attentive probe failed on {ckpt.name}: {e}",
-                    flush=True,
-                )
-                _maybe_wandb_finish()
+        run_probes_on_checkpoint(pretrain_cfg, ckpt, probes=probes)
 
     print("[post_train_eval] done", flush=True)
+
+
+def _cli_main() -> int:
+    """CLI entrypoint used by Trainer's on-save subprocess launcher.
+
+    Loads the run's saved config.yaml (as written by Trainer.training_loop
+    on first save) so the subprocess sees the same dataset/model/ft blocks
+    the pretrain process composed, and runs the requested probes on a
+    single checkpoint.
+    """
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Path to the saved run config.yaml")
+    parser.add_argument("--checkpoint", required=True, help="Encoder checkpoint path")
+    parser.add_argument(
+        "--probes",
+        nargs="+",
+        default=None,
+        help="Probe subset to run (defaults to cfg.post_train_eval.probes)",
+    )
+    args = parser.parse_args()
+
+    cfg = OmegaConf.load(args.config)
+    OmegaConf.set_struct(cfg, False)
+    _clear_dist_env()
+    run_probes_on_checkpoint(cfg, args.checkpoint, probes=args.probes)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli_main())

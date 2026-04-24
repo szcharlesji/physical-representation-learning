@@ -71,3 +71,6 @@ post_train_eval:
   enabled: true
   probes: [linear, knn, attentive]
   frozen_config: configs/train_activematter_frozen.yaml
+  on_save: true
+  on_save_blocking: true
+  on_save_probes: [linear, knn]

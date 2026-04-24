@@ -58,3 +58,10 @@ post_train_eval:
   enabled: true
   probes: [linear, knn, attentive]
   frozen_config: configs/train_activematter_frozen.yaml
+  # on_save=true fires probes as a blocking subprocess right after each
+  # checkpoint save so probe metrics surface in W&B live. on_save_probes
+  # defaults to `probes`; narrow it (e.g. [linear, knn]) to keep the per-save
+  # hit cheap.
+  on_save: false
+  on_save_blocking: true
+  # on_save_probes: [linear, knn]
