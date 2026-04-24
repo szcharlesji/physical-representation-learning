@@ -9,13 +9,12 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .data import get_dataset
@@ -181,6 +180,8 @@ class FrozenEvaluator:
 
         mean = train_f["labels_raw"].mean(0)
         std = train_f["labels_raw"].std(0).clamp_min(1e-8)
+        self._y_mean = mean
+        self._y_std = std
         for s in (train_f, val_f, test_f):
             s["labels"] = (s["labels_raw"] - mean) / std
 
@@ -209,8 +210,10 @@ class FrozenEvaluator:
         return results
 
     def _report(self, results: List[Dict], mean, std):
-        header = ["probe_type", "k", "metric", "split", "mse_zeta", "mse_alpha", "mse_mean"]
-        widths = [10, 5, 10, 5, 10, 10, 10]
+        header = ["probe_type", "k", "metric", "split",
+                  "mse_alpha", "mse_zeta", "mse_mean",
+                  "mse_alpha_raw", "mse_zeta_raw", "mse_mean_raw"]
+        widths = [10, 5, 10, 5, 10, 10, 10, 14, 14, 14]
 
         def fmt(v, w):
             if v is None:
@@ -238,6 +241,7 @@ class FrozenEvaluator:
             "label_order": PARAM_NAMES,
             "label_mean": mean,
             "label_std": std,
+            "methodology": {"linear": "lstsq", "knn": "inv_distance"},
             "results": results,
         }
         out_path = self.out_dir / "results.json"
@@ -246,147 +250,114 @@ class FrozenEvaluator:
         print(f"results saved to {out_path}", flush=True)
 
     # ------------------------------------------------------------------ linear
-    @staticmethod
-    def _per_param_mse(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+    def _per_param_mse(self, pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
         err = (pred - target) ** 2
         per = err.mean(dim=0).tolist()
         out = {f"mse_{PARAM_NAMES[i]}": float(per[i]) for i in range(len(PARAM_NAMES))}
         out["mse_mean"] = float(err.mean().item())
+        mean = self._y_mean.to(pred.device, dtype=pred.dtype)
+        std = self._y_std.to(pred.device, dtype=pred.dtype)
+        pred_r = pred * std + mean
+        target_r = target * std + mean
+        err_r = (pred_r - target_r) ** 2
+        per_r = err_r.mean(dim=0).tolist()
+        for i in range(len(PARAM_NAMES)):
+            out[f"mse_{PARAM_NAMES[i]}_raw"] = float(per_r[i])
+        out["mse_mean_raw"] = float(err_r.mean().item())
         return out
 
     def run_linear(self, train_f, val_f, test_f) -> List[Dict]:
         lin_cfg = self.cfg.ft.linear
-        in_dim = train_f["features"].shape[1]
-        out_dim = train_f["labels"].shape[1]
-        head = nn.Linear(in_dim, out_dim, bias=lin_cfg.get("bias", True)).to(self.device)
+        X = train_f["features"]
+        Y = train_f["labels"]
+        design = torch.cat(
+            [X, torch.ones(X.size(0), 1, dtype=X.dtype)], dim=1
+        ) if lin_cfg.get("bias", True) else X
+        sol = torch.linalg.lstsq(design, Y).solution
+        if lin_cfg.get("bias", True):
+            W = sol[:-1].T.contiguous()
+            b = sol[-1].contiguous()
+        else:
+            W = sol.T.contiguous()
+            b = torch.zeros(Y.size(1), dtype=Y.dtype)
 
-        optimizer = torch.optim.AdamW(
-            head.parameters(),
-            lr=lin_cfg.lr,
-            weight_decay=lin_cfg.weight_decay,
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=lin_cfg.num_epochs,
-            eta_min=lin_cfg.get("min_lr", 0.0),
-        )
-        loss_fn = nn.MSELoss()
-
-        train_loader = DataLoader(
-            TensorDataset(train_f["features"], train_f["labels"]),
-            batch_size=lin_cfg.batch_size,
-            shuffle=True,
-            drop_last=False,
-        )
-
-        val_x = val_f["features"].to(self.device)
-        val_y = val_f["labels"].to(self.device)
-
-        best_val = float("inf")
-        best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
-        for epoch in range(lin_cfg.num_epochs):
-            head.train()
-            epoch_losses = []
-            for x, y in train_loader:
-                x = x.to(self.device, non_blocking=True)
-                y = y.to(self.device, non_blocking=True)
-                pred = head(x)
-                loss = loss_fn(pred, y)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                epoch_losses.append(loss.item())
-            scheduler.step()
-
-            head.eval()
-            with torch.no_grad():
-                val_pred = head(val_x)
-                val_metrics = self._per_param_mse(val_pred, val_y)
-            train_mse = float(np.mean(epoch_losses))
-            log = {
-                "linear/epoch": epoch,
-                "linear/train_mse": train_mse,
-                "linear/lr": scheduler.get_last_lr()[0],
-                **{f"linear/val_{k}": v for k, v in val_metrics.items()},
-                # unified cross-probe metric so linear/knn/attentive overlay in W&B
-                "probe/val_mse": val_metrics["mse_mean"],
-                "probe/epoch": epoch,
-            }
-            if self._wandb_on:
-                wandb.log(log)
-            if epoch % max(1, lin_cfg.num_epochs // 20) == 0 or epoch == lin_cfg.num_epochs - 1:
-                print(
-                    f"[linear] epoch {epoch:03d} train_mse={train_mse:.4f} "
-                    f"val_mse_mean={val_metrics['mse_mean']:.4f}",
-                    flush=True,
-                )
-            if val_metrics["mse_mean"] < best_val:
-                best_val = val_metrics["mse_mean"]
-                best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
-
-        ckpt_path = self.out_dir / "linear_best.pt"
-        torch.save(best_state, ckpt_path)
-        print(f"[linear] best val mse_mean={best_val:.4f} saved to {ckpt_path}", flush=True)
-
-        head.load_state_dict(best_state)
-        head.eval()
         out: List[Dict] = []
         final_by_split: Dict[str, Dict] = {}
-        with torch.no_grad():
-            for name, f in (("val", val_f), ("test", test_f)):
-                x = f["features"].to(self.device)
-                y = f["labels"].to(self.device)
-                metrics = self._per_param_mse(head(x), y)
-                final_by_split[name] = metrics
-                out.append({"probe_type": "linear", "k": None, "metric": None,
-                            "split": name, **metrics})
+        for name, f in (("val", val_f), ("test", test_f)):
+            pred = f["features"] @ W.T + b
+            metrics = self._per_param_mse(pred, f["labels"])
+            final_by_split[name] = metrics
+            out.append({"probe_type": "linear", "k": None, "metric": None,
+                        "split": name, **metrics})
+            print(
+                f"[linear] split={name:4s} mse_mean={metrics['mse_mean']:.4f} "
+                f"mse_mean_raw={metrics['mse_mean_raw']:.4f}",
+                flush=True,
+            )
+
+        ckpt_path = self.out_dir / "linear_lstsq.pt"
+        torch.save({"weight": W, "bias": b}, ckpt_path)
+        print(f"[linear] lstsq solution saved to {ckpt_path}", flush=True)
+
         if self._wandb_on:
             wandb.log({
-                "probe/best_val_mse": best_val,
-                "probe/val_mse_final": final_by_split["val"]["mse_mean"],
+                "probe/val_mse": final_by_split["val"]["mse_mean"],
+                "probe/val_mse_raw": final_by_split["val"]["mse_mean_raw"],
                 "probe/test_mse_final": final_by_split["test"]["mse_mean"],
+                "probe/test_mse_final_raw": final_by_split["test"]["mse_mean_raw"],
             })
-            wandb.run.summary["probe/best_val_mse"] = best_val
+            wandb.run.summary["probe/best_val_mse"] = final_by_split["val"]["mse_mean"]
             wandb.run.summary["probe/test_mse_final"] = final_by_split["test"]["mse_mean"]
         return out
 
 
     # --------------------------------------------------------------------- knn
     def run_knn(self, train_f, val_f, test_f) -> List[Dict]:
-        from sklearn.neighbors import KNeighborsRegressor
-
         knn_cfg = self.cfg.ft.knn
-        x_tr = train_f["features"].numpy()
-        y_tr = train_f["labels"].numpy()
-        x_va = val_f["features"].numpy()
-        y_va = val_f["labels"].numpy()
-        x_te = test_f["features"].numpy()
-        y_te = test_f["labels"].numpy()
+        chunk = int(knn_cfg.get("chunk_size", 1024))
+        eps = 1e-8
+
+        x_tr = train_f["features"]
+        y_tr = train_f["labels"]
+
+        def predict(xq: torch.Tensor, xt: torch.Tensor, yt: torch.Tensor,
+                    k: int, metric: str) -> torch.Tensor:
+            if metric == "cosine":
+                xq = F.normalize(xq, dim=1)
+                xt = F.normalize(xt, dim=1)
+            chunks = []
+            for qc in xq.split(chunk):
+                d = torch.cdist(qc, xt)
+                dk, ik = torch.topk(d, k=k, dim=1, largest=False)
+                yk = yt[ik]  # (q, k, out)
+                zero = dk <= eps
+                w = dk.clamp_min(eps).reciprocal()
+                w = w / w.sum(dim=1, keepdim=True)
+                if zero.any():
+                    zw = zero.to(dtype=w.dtype)
+                    zw = zw / zw.sum(dim=1, keepdim=True).clamp_min(1.0)
+                    exact = (zw.unsqueeze(-1) * yk).sum(1)
+                    weighted = (w.unsqueeze(-1) * yk).sum(1)
+                    use_exact = zero.any(dim=1, keepdim=True)
+                    chunks.append(torch.where(use_exact, exact, weighted))
+                else:
+                    chunks.append((w.unsqueeze(-1) * yk).sum(1))
+            return torch.cat(chunks, dim=0)
 
         out: List[Dict] = []
         best = None
-        # Per-(metric,k) pair, treat as a virtual "step" so `probe/val_mse`
-        # plots a curve over configs rather than a single scalar.
         step = 0
         for metric in knn_cfg.metrics:
-            algorithm = "brute" if metric == "cosine" else "auto"
             for k in knn_cfg.ks:
-                if k > len(x_tr):
-                    print(f"[knn] skipping k={k} > n_train={len(x_tr)}", flush=True)
+                if k > x_tr.size(0):
+                    print(f"[knn] skipping k={k} > n_train={x_tr.size(0)}", flush=True)
                     continue
-                model = KNeighborsRegressor(
-                    n_neighbors=k, metric=metric, algorithm=algorithm, n_jobs=-1,
-                )
-                model.fit(x_tr, y_tr)
                 pair_metrics_val = None
-                pair_metrics_test = None
-                for name, x, y in (("val", x_va, y_va), ("test", x_te, y_te)):
-                    pred = torch.from_numpy(model.predict(x))
-                    target = torch.from_numpy(y)
-                    metrics = self._per_param_mse(pred, target)
-                    row = {"probe_type": "knn", "k": k, "metric": metric,
-                           "split": name, **metrics}
-                    out.append(row)
+                for name, f in (("val", val_f), ("test", test_f)):
+                    pred = predict(f["features"], x_tr, y_tr, k, metric)
+                    metrics = self._per_param_mse(pred, f["labels"])
+                    out.append({"probe_type": "knn", "k": k, "metric": metric,
+                                "split": name, **metrics})
                     if name == "val":
                         pair_metrics_val = metrics
                         if best is None or metrics["mse_mean"] < best["val_mse_mean"]:
@@ -395,19 +366,19 @@ class FrozenEvaluator:
                                 "val_mse_mean": metrics["mse_mean"],
                                 "test_mse_mean": None,
                             }
-                    else:
-                        pair_metrics_test = metrics
-                        if best is not None and best["k"] == k and best["metric"] == metric:
-                            best["test_mse_mean"] = metrics["mse_mean"]
+                    elif best is not None and best["k"] == k and best["metric"] == metric:
+                        best["test_mse_mean"] = metrics["mse_mean"]
                     print(
                         f"[knn] k={k:3d} metric={metric:9s} split={name:4s} "
-                        f"mse_mean={metrics['mse_mean']:.4f}",
+                        f"mse_mean={metrics['mse_mean']:.4f} "
+                        f"mse_mean_raw={metrics['mse_mean_raw']:.4f}",
                         flush=True,
                     )
                 if self._wandb_on and pair_metrics_val is not None:
                     wandb.log({
                         f"knn/{metric}/k{k}_val_mse_mean": pair_metrics_val["mse_mean"],
                         "probe/val_mse": pair_metrics_val["mse_mean"],
+                        "probe/val_mse_raw": pair_metrics_val["mse_mean_raw"],
                         "probe/knn_k": k,
                         "probe/knn_metric_is_cosine": 1 if metric == "cosine" else 0,
                         "probe/step": step,
