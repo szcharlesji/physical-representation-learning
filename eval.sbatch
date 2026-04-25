@@ -15,21 +15,33 @@
 set -euo pipefail
 
 CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
+PROBES="${2:-linear knn attentive}"   # space-separated, e.g. "linear knn"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
 IMAGE=/share/apps/images/cuda13.0.1-cudnn9.13.0-ubuntu-24.04.3.sif
-CONFIG=configs/train_activematter_frozen.yaml
 
-# Derive a per-checkpoint tag: "<run_dir>_epoch<N>" from ".../noise-std-1.0_2026.../ConvEncoder_11.pth"
-CKPT_BASE=$(basename "$CKPT" .pth)                   # e.g. ConvEncoder_11
-EPOCH=${CKPT_BASE##*_}                                # e.g. 11
-RUN_DIR=$(basename "$(dirname "$CKPT")")              # e.g. noise-std-1.0_2026-04-16_22:00:00
-TAG="${RUN_DIR}_epoch${EPOCH}"
-OUT_DIR="$REPO/frozen_eval_out/$TAG"
+# Use the run's saved config.yaml so dataset/model/ft match what the
+# encoder was trained with (resize_mode, resolution, backbone, etc.).
+RUN_DIR_FULL=$(dirname "$CKPT")
+RUN_CONFIG="$RUN_DIR_FULL/config.yaml"
+if [[ ! -f "$RUN_CONFIG" ]]; then
+  echo "ERROR: $RUN_CONFIG not found. Re-run training to write the run config, or fall back to:"
+  echo "  python -m physics_jepa.eval_frozen --config <matching-train-yaml> --checkpoint $CKPT \\"
+  echo "      dataset.resize_mode=<bilinear|fft> dataset.resolution=<H,W>"
+  exit 2
+fi
 
-echo "[$(date)] Job $SLURM_JOB_ID on $(hostname) — checkpoint: $CKPT"
-echo "results will land in: $OUT_DIR"
+# Per-checkpoint output dir mirrors post_train_probes' layout.
+CKPT_BASE=$(basename "$CKPT" .pth)               # e.g. ConvEncoder_11
+RUN_DIR=$(basename "$RUN_DIR_FULL")              # e.g. vit3d-depth6_2026-04-24...
+OUT_DIR="$REPO/frozen_eval_out/$RUN_DIR/$CKPT_BASE"
+
+echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
+echo "checkpoint: $CKPT"
+echo "run config: $RUN_CONFIG"
+echo "probes:     $PROBES"
+echo "out dir:    $OUT_DIR"
 nvidia-smi
 
 singularity exec --nv \
@@ -41,11 +53,11 @@ singularity exec --nv \
     cd $REPO
     export THE_WELL_DATA_DIR=$REPO/datasets
     export HDF5_USE_FILE_LOCKING=FALSE
-    python -m physics_jepa.eval_frozen \
-      --config $CONFIG \
+    export WANDB_API_KEY=\${WANDB_API_KEY:-}
+    python -m physics_jepa.post_train_probes \
+      --config $RUN_CONFIG \
       --checkpoint $CKPT \
-      ft.out_dir=$OUT_DIR \
-      ft.run_name=frozen-$TAG
+      --probes $PROBES
   "
 
-echo "[$(date)] Done — results at $OUT_DIR/results.json"
+echo "[$(date)] Done — frozen results at $OUT_DIR/results.json"
