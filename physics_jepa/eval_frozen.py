@@ -143,25 +143,27 @@ class FrozenEvaluator:
         )
         return out
 
-    def _init_wandb_for_probe(self, probe_type: str):
-        """Start a wandb run scoped to a single probe type.
+    def _init_wandb(self, job_type: str):
+        """Start a single wandb run that hosts every probe in this evaluator.
 
-        `probe_type` is "linear" or "knn". Group ties the run to the pretrain
-        checkpoint so pretrain + probes cluster together in the W&B UI.
+        `job_type` is one of `probe_linear`, `probe_knn`, `probe_frozen`. When
+        eval_mode runs both linear and knn we use `probe_frozen` so they land
+        in one run and metrics live under `linear/...` and `knn/...` prefixes.
         """
         if self.cfg.get("dry_run", False):
             self._wandb_on = False
             return
         group = group_from_checkpoint(self.checkpoint_path)
         ckpt_stem = Path(self.checkpoint_path).stem  # e.g. ConvEncoder_11
-        name = self.cfg.ft.get("run_name") or f"{group}-probe_{probe_type}-{ckpt_stem}"
+        name = self.cfg.ft.get("run_name") or f"{group}-{job_type}-{ckpt_stem}"
         wandb_init_run(
             self.cfg,
-            job_type=f"probe_{probe_type}",
+            job_type=job_type,
             group=group,
             name=name,
             extra_config={
-                "probe_type": probe_type,
+                "probe_type": job_type.replace("probe_", ""),
+                "eval_mode": self.eval_mode,
                 "checkpoint_path": str(Path(self.checkpoint_path).resolve()),
             },
         )
@@ -205,15 +207,24 @@ class FrozenEvaluator:
             flush=True,
         )
 
+        # One wandb run hosts every probe FrozenEvaluator runs in this call:
+        # `probe_frozen` when both linear and knn fire, otherwise the
+        # single-probe job_type. Metrics are namespaced by `linear/` and
+        # `knn/` so they coexist on one run's chart panel.
+        if self.eval_mode == "linear_and_knn":
+            job_type = "probe_frozen"
+        elif self.eval_mode == "linear":
+            job_type = "probe_linear"
+        else:
+            job_type = "probe_knn"
+        self._init_wandb(job_type)
+
         results: List[Dict] = []
         if self.eval_mode in ("linear", "linear_and_knn"):
-            self._init_wandb_for_probe("linear")
             results += self.run_linear(train_f, val_f, test_f)
-            self._finish_wandb()
         if self.eval_mode in ("knn", "linear_and_knn"):
-            self._init_wandb_for_probe("knn")
             results += self.run_knn(train_f, val_f, test_f)
-            self._finish_wandb()
+        self._finish_wandb()
 
         self._report(results, mean=mean.tolist(), std=std.tolist())
         return results
@@ -310,13 +321,19 @@ class FrozenEvaluator:
 
         if self._wandb_on:
             wandb.log({
-                "probe/val_mse": final_by_split["val"]["mse_mean"],
-                "probe/val_mse_raw": final_by_split["val"]["mse_mean_raw"],
-                "probe/test_mse_final": final_by_split["test"]["mse_mean"],
-                "probe/test_mse_final_raw": final_by_split["test"]["mse_mean_raw"],
+                "linear/val_mse": final_by_split["val"]["mse_mean"],
+                "linear/val_mse_raw": final_by_split["val"]["mse_mean_raw"],
+                "linear/test_mse": final_by_split["test"]["mse_mean"],
+                "linear/test_mse_raw": final_by_split["test"]["mse_mean_raw"],
+                "linear/val_mse_alpha": final_by_split["val"]["mse_alpha"],
+                "linear/val_mse_zeta": final_by_split["val"]["mse_zeta"],
+                "linear/test_mse_alpha": final_by_split["test"]["mse_alpha"],
+                "linear/test_mse_zeta": final_by_split["test"]["mse_zeta"],
             })
-            wandb.run.summary["probe/best_val_mse"] = final_by_split["val"]["mse_mean"]
-            wandb.run.summary["probe/test_mse_final"] = final_by_split["test"]["mse_mean"]
+            wandb.run.summary["linear/val_mse"] = final_by_split["val"]["mse_mean"]
+            wandb.run.summary["linear/test_mse"] = final_by_split["test"]["mse_mean"]
+            wandb.run.summary["linear/val_mse_raw"] = final_by_split["val"]["mse_mean_raw"]
+            wandb.run.summary["linear/test_mse_raw"] = final_by_split["test"]["mse_mean_raw"]
         return out
 
 
@@ -386,11 +403,12 @@ class FrozenEvaluator:
                 if self._wandb_on and pair_metrics_val is not None:
                     wandb.log({
                         f"knn/{metric}/k{k}_val_mse_mean": pair_metrics_val["mse_mean"],
-                        "probe/val_mse": pair_metrics_val["mse_mean"],
-                        "probe/val_mse_raw": pair_metrics_val["mse_mean_raw"],
-                        "probe/knn_k": k,
-                        "probe/knn_metric_is_cosine": 1 if metric == "cosine" else 0,
-                        "probe/step": step,
+                        f"knn/{metric}/k{k}_val_mse_mean_raw": pair_metrics_val["mse_mean_raw"],
+                        "knn/sweep_val_mse": pair_metrics_val["mse_mean"],
+                        "knn/sweep_val_mse_raw": pair_metrics_val["mse_mean_raw"],
+                        "knn/sweep_k": k,
+                        "knn/sweep_metric_is_cosine": 1 if metric == "cosine" else 0,
+                        "knn/sweep_step": step,
                     })
                 step += 1
 
@@ -405,14 +423,14 @@ class FrozenEvaluator:
                     out.append({**r, "probe_type": "knn_best"})
             if self._wandb_on:
                 wandb.log({
-                    "probe/best_val_mse": best["val_mse_mean"],
-                    "probe/test_mse_final": best["test_mse_mean"],
+                    "knn/best_val_mse": best["val_mse_mean"],
+                    "knn/best_test_mse": best["test_mse_mean"],
                 })
-                wandb.run.summary["probe/best_val_mse"] = best["val_mse_mean"]
+                wandb.run.summary["knn/best_val_mse"] = best["val_mse_mean"]
                 if best["test_mse_mean"] is not None:
-                    wandb.run.summary["probe/test_mse_final"] = best["test_mse_mean"]
-                wandb.run.summary["probe/best_knn_k"] = best["k"]
-                wandb.run.summary["probe/best_knn_metric"] = best["metric"]
+                    wandb.run.summary["knn/best_test_mse"] = best["test_mse_mean"]
+                wandb.run.summary["knn/best_k"] = best["k"]
+                wandb.run.summary["knn/best_metric"] = best["metric"]
         return out
 
 
