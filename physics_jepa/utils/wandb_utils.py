@@ -13,7 +13,15 @@ from omegaconf import OmegaConf
 DEFAULT_PROJECT = "physics-jepa-baseline"
 
 # Allowed values for job_type; kept as a constant so callers don't drift.
-JOB_TYPES = ("pretrain", "probe_linear", "probe_knn", "probe_frozen", "probe_attentive", "probe_mlp")
+JOB_TYPES = (
+    "pretrain",
+    "probe_linear",
+    "probe_knn",
+    "probe_frozen",
+    "probe_attentive",
+    "probe_mlp",
+    "probe_eval_curve",  # eval_run.py: cross-checkpoint sweep, 9-curve panel
+)
 
 
 def build_tags(cfg, extra: Optional[Iterable[str]] = None) -> list:
