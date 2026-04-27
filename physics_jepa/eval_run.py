@@ -205,13 +205,16 @@ def main() -> int:
     OmegaConf.set_struct(cfg, False)
     _clear_dist_env()
 
-    frozen_config = args.frozen_config or cfg.get("post_train_eval", {}).get(
-        "frozen_config", None
-    )
+    # Prefer the run's own config when it specifies a frozen config (newer
+    # runs do this via post_train_eval.frozen_config). Fall back to --frozen_config
+    # for older runs whose config.yaml predates that block.
+    frozen_config = cfg.get("post_train_eval", {}).get("frozen_config", None) \
+        or args.frozen_config
     if frozen_config is None and ("linear" in args.probes or "knn" in args.probes):
         raise SystemExit(
             "--frozen_config or post_train_eval.frozen_config required for linear/knn"
         )
+    print(f"[eval_run] frozen_config: {frozen_config}", flush=True)
 
     ckpts = find_checkpoints(run_dir)
     epoch_ckpts = [(c, _epoch_from_ckpt(c)) for c in ckpts]

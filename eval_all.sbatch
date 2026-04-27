@@ -16,15 +16,19 @@
 #
 # usage:
 #   sbatch eval_all.sbatch <run_dir>
-#   sbatch eval_all.sbatch <run_dir> "linear knn"     # skip attentive
+#   sbatch eval_all.sbatch <run_dir> "linear knn"                      # skip attentive
+#   sbatch eval_all.sbatch <run_dir> "linear knn attentive" <fcfg>     # custom frozen cfg
 #
 # <run_dir> must contain ConvEncoder_*.pth and config.yaml (training writes
-# config.yaml on first save).
+# config.yaml on first save). The 3rd arg is needed only for runs whose
+# config.yaml predates the post_train_eval block; otherwise we read
+# cfg.post_train_eval.frozen_config and the default below is unused.
 
 set -euo pipefail
 
 RUN_DIR="${1:?pass run directory containing checkpoints + config.yaml}"
 PROBES="${2:-linear knn attentive}"
+FROZEN_CONFIG="${3:-configs/train_activematter_frozen.yaml}"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
@@ -36,8 +40,9 @@ if [[ ! -f "$RUN_DIR/config.yaml" ]]; then
 fi
 
 echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
-echo "run_dir: $RUN_DIR"
-echo "probes:  $PROBES"
+echo "run_dir:       $RUN_DIR"
+echo "probes:        $PROBES"
+echo "frozen_config: $FROZEN_CONFIG (used only if cfg.post_train_eval.frozen_config is unset)"
 nvidia-smi
 
 singularity exec --nv \
@@ -53,7 +58,8 @@ singularity exec --nv \
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     python -m physics_jepa.eval_run \
       --ckpt_dir $RUN_DIR \
-      --probes $PROBES
+      --probes $PROBES \
+      --frozen_config $FROZEN_CONFIG
   "
 
 echo "[$(date)] Done — eval_curve.json under $RUN_DIR"
