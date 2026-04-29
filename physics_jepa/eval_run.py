@@ -104,8 +104,8 @@ def _attentive_metrics(cfg: DictConfig, ckpt_path: str) -> Dict[str, float]:
     `configs/ft/linear.yaml`). We override `val()` to record per-param MSE
     each epoch and keep the snapshot whose mean is lowest.
     """
-    from .data import normalize_labels
     from .finetuner import JepaFinetuner
+    from .utils.data_utils import normalize_labels
 
     sub = copy.deepcopy(cfg)
     OmegaConf.set_struct(sub, False)
