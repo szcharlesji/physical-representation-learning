@@ -17,4 +17,10 @@ datasets/
 *.err
 *.out
 repomix-output.xml
-.DS_STORE
+.DS_Store
+.venv-data/
+data/.cache/
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
