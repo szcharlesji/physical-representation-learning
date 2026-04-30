@@ -12,9 +12,13 @@ Research code for JEPA-style representation learning on PDE-simulation data from
   - `train.py` — pretraining loop (Trainer). Entry module: `python -m physics_jepa.train_jepa <config.yaml>`
   - `finetuner.py` — **attentive probe** (and from-embeddings linear/MLP head). Caches embeddings per-checkpoint in `ft.embeddings_dir`
   - `eval_frozen.py` — **kNN + linear probe** on frozen features. Caches features under `ft.feature_cache_dir`, keyed by SHA of (ckpt, split, dataset, num_frames, resolution, resize_mode, pool)
+  - `eval_run.py` — **cross-checkpoint eval-curve sweep** (`job_type=probe_eval_curve`). Iterates every `ConvEncoder_*.pth` in a run dir, runs the configured probes, and logs one tidy W&B run with `{linear,knn,attentive}/{mean,alpha,zeta}` indexed by `epoch` plus per-probe `best_*` summary keys. This is the run that `data/fetch.py` consumes.
+  - `post_train_probes.py` — auto-probes invoked at end of training and live per-checkpoint (see *Auto-probe* section).
   - `data.py` — `WellDatasetForJEPA` (primary) and `WellDatasetForMPP` (baseline only). HDF5 shard-scanner + (context,target) windowing
-  - `model.py`, `utils/model_utils.py` — `ConvEncoder` (default) and `ConvEncoderViTTiny` (when `model.vit_equivalency: tiny`)
+  - `model.py`, `utils/model_utils.py` — `ConvEncoder` (default), `ConvEncoderViTTiny` (when `model.vit_equivalency: tiny`), and `ViT3DEncoder` (`model.backbone: vit3d`).
   - `videomae.py`, `baselines/` — baselines (VideoMAE, DISCO, MPP). **Out of scope for most edits.**
+- `data/` — wandb metrics → tidy CSVs → report figures. `fetch.py` pulls eval-curve runs (and reconstructs ViT3D from per-checkpoint `probe_frozen` runs); `plot.py` renders the 6 PDF/PNG figures consumed by `report/`. Run via `make all` from `data/`. Uses a project-local venv at repo root: `.venv-data/` (gitignored); cache lives in `data/.cache/` (gitignored). See `data/README.md` for setup.
+- `report/` — LaTeX writeup. `report.tex` + `diagrams/{fft,linear_probe,knn_probe,vit3d,conv_attn}.tex` (standalone TikZ snippets sharing `_tikz_styles.tex`). Build with `make pdf`. Figures resolved via `\graphicspath{{../data/figures/}}` so the report consumes `data/`'s output without copies. Mirror of this directory's diagrams + figures lives in `~/Downloads/DL_project/` (collaborative ICML paper); when editing there, only `benchmarks.tex` lines 1-114 are mine — lines 115+ are teammates' (Field-aware JEPA, Hierarchical JEPA).
 - `configs/`
   - `train_*_small.yaml` — pretrain + attentive-probe path (ft: linear). Each has `dataset:`, `model:`, `train:`, `ft:` blocks.
   - `train_activematter_frozen.yaml` — kNN + linear-probe path (ft: frozen). Only exists for active_matter.
@@ -74,7 +78,7 @@ When `post_train_eval.on_save: true`, `Trainer` launches a probe subprocess righ
 All runs go through `physics_jepa/utils/wandb_utils.py::init_run`. One project, filter-by-tag.
 
 - **project**: env `WANDB_PROJECT` → fallback `physics-jepa-baseline`. FFT and other variants are **tags**, not separate projects.
-- **job_type** (how to split probes on the UI): `pretrain` | `probe_linear` | `probe_knn` | `probe_attentive` | `probe_mlp`. `eval_frozen.py` with `eval_mode=linear_and_knn` produces two sequential runs, one per `job_type`.
+- **job_type** (how to split probes on the UI): `pretrain` | `probe_linear` | `probe_knn` | `probe_frozen` | `probe_attentive` | `probe_mlp` | `probe_eval_curve`. `eval_frozen.py` with `eval_mode=linear_and_knn` produces two sequential runs, one per `job_type`; with both probes enabled in one process it tags as `probe_frozen`. `eval_run.py` produces a single `probe_eval_curve` run per pretrain group — that's what `data/fetch.py` reads.
 - **group**: pretrain uses `f"{run_name}_{timestamp}"` (matches the on-disk checkpoint dir). Probes reuse it via `group_from_checkpoint(cfg.ft.trained_model_path)`, which is `Path(ckpt).parent.name`. Pretrain + all its downstream probes cluster together in the W&B UI.
 - **tags**: `build_tags` emits `[dataset.name, model.name, resize_mode, objective, backbone, regularizer]`. Filter the sidebar by `vit3d`/`conv3d_next`/`conv3d_next_attn` for architecture, or by `vicreg`/`sigreg` for the regularizer. Dedup keeps duplicate strings (e.g. `model.name=vit3d` and `model.backbone=vit3d` both resolve to one `vit3d` tag).
 - **unified probe metric**: every probe path logs `probe/val_mse` (periodic) and sets `summary["probe/best_val_mse"]` so linear/knn/attentive runs overlay directly on a single W&B chart. `eval_frozen` also logs `probe/test_mse_final`. Attentive-probe path (inside `Trainer.training_loop`) only emits these on probe runs (`self.wandb_job_type.startswith("probe_")` and regression task) — pretrain is unaffected.
@@ -136,3 +140,4 @@ Selected by `build_encoder` in [physics_jepa/model.py](physics_jepa/model.py):
 - Don't edit `configs/dataset/*.yaml` for experiment-level changes — those are defaults consumed by FT/eval/baselines too. Override in the experiment's train config instead.
 - Don't edit baselines (`videomae.py`, `baselines/*`, `train_*_videomae.yaml`) unless the task explicitly names them.
 - Don't edit `WellDatasetForMPP` — it's used only by the MPP baseline.
+- `report/diagrams/_tikz_styles.tex` must use `>=stealth'` (the legacy `arrows`-library arrow tip), not `>=Stealth` from `arrows.meta`. The collaborative ICML paper at `~/Downloads/DL_project/` loads only the legacy `arrows` library; switching back to `Stealth` breaks the teammates' build.

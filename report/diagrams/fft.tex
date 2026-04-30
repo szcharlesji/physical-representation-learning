@@ -1,0 +1,23 @@
+% FFT-based resize pipeline (resize_mode: fft).
+% Standalone tikzpicture; relies on shared styles in _tikz_styles.tex.
+\begin{tikzpicture}[
+  node distance = 4mm and 6mm,
+  every node/.style = {font=\scriptsize, inner sep=1.5pt}]
+
+  \node[data]                  (x)   {$x$};
+  \node[op,   right=of x]      (fft) {$\mathcal{F}_{2}$};
+  \node[op,   right=of fft]    (sh1) {fftshift};
+  \node[op,   right=of sh1]    (cp)  {crop\,/\,pad};
+  \node[op,   right=of cp]     (sh2) {ifftshift};
+  \node[op,   right=of sh2]    (ift) {$\mathcal{F}_{2}^{-1}$};
+  \node[op,   right=of ift]    (sc)  {$\times\rho$};
+  \node[data, right=of sc]     (y)   {$y$};
+
+  \foreach \a/\b in {x/fft, fft/sh1, sh1/cp, cp/sh2, sh2/ift, ift/sc, sc/y}
+    \draw[arrow] (\a) -- (\b);
+
+  \node[meta, below=2mm of x]   {$C{\times}H_{n}{\times}W_{n}$};
+  \node[meta, below=2mm of cp]  {around DC bin};
+  \node[meta, below=2mm of sc]  {$\rho{=}HW/H_{n}W_{n}$};
+  \node[meta, below=2mm of y]   {$C{\times}H{\times}W$};
+\end{tikzpicture}

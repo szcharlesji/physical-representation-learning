@@ -1,0 +1,28 @@
+% Linear probe: frozen encoder -> spatial pool -> closed-form ridge regression.
+\begin{tikzpicture}[
+  node distance = 5mm and 10mm,
+  every node/.style = {font=\scriptsize, inner sep=1.5pt}]
+
+  \node[data]                  (x)    {$x$};
+  \node[frozen, right=of x]    (enc)  {$f_{\theta}$};
+  \node[data, right=of enc]    (z)    {$z$};
+  \node[op,   right=of z]      (pool) {pool};
+  \node[data, right=of pool]   (zb)   {$\bar z$};
+  \node[op,   right=of zb]     (W)    {$W\bar z + b$};
+  \node[data, right=of W]      (yh)   {$\hat y$};
+  \node[loss, right=of yh]     (mse)  {MSE};
+  \node[data, below=10mm of mse, xshift=-3mm] (y)   {$y_{z}$};
+
+  \foreach \a/\b in {x/enc, enc/z, z/pool, pool/zb, zb/W, W/yh, yh/mse}
+    \draw[arrow] (\a) -- (\b);
+  \draw[arrow] (y) -- (mse);
+
+  \node[meta, below=2mm of x]    {input};
+  \node[meta, below=2mm of enc]  {frozen};
+  \node[meta, below=2mm of z]    {$(B,128,1,14,14)$};
+  \node[meta, below=2mm of pool] {GAP or flatten};
+  \node[meta, below=2mm of zb]   {$(B,D)$};
+  \node[meta, below=2mm of W]    {closed-form lstsq};
+  \node[meta, below=2mm of yh]   {$(B,2)$};
+  \node[meta, right=2mm of y, font=\tiny, gray!75] {z-normalised};
+\end{tikzpicture}

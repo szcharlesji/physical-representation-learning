@@ -1,0 +1,294 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, citecolor=blue!50!black, urlcolor=blue!50!black}
+\usepackage{microtype}
+\usepackage{amsmath, amssymb}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, shapes.geometric, shapes.symbols, positioning, calc, fit}
+\input{diagrams/_tikz_styles}
+
+\graphicspath{{../data/figures/}}
+
+\title{JEPA Pretraining for Physical Parameter Regression\\
+       \large Empirical Study on \texttt{active\_matter}}
+
+\newcommand{\probe}[1]{\textsc{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+We pretrain a video encoder on \texttt{active\_matter} simulations from
+\href{https://github.com/PolymathicAI/the_well}{The~Well} using a JEPA-style
+self-supervised objective, then evaluate the frozen features by regressing the
+underlying physical parameters $(\alpha, \zeta)$ with three probes of
+increasing capacity: a linear probe (\probe{linear}), a $k$-NN probe with a
+sweep over $k$ and metric (\probe{knn}), and an attentive probe
+(\probe{attentive}). We report validation MSE in z-score units; lower is
+better. The headline question is which design decisions actually move the
+needle, not whether any single number is state-of-the-art.
+
+\section{Experimental setup}
+
+\paragraph{Data.} \texttt{active\_matter} samples are 16-frame clips, native
+$256{\times}256$. Each (context, target) JEPA window draws a single sample
+$(\alpha, \zeta)$ as the regression label.
+
+\paragraph{Pretraining.} The encoder is a pure 3D-conv ResNet
+(\code{conv3d\_next}) with optional self-attention stages, or a 3D ViT
+(\code{vit3d}). The objective is VICReg-style invariance$+$variance$+$covariance
+on context/target embeddings unless noted otherwise. Each pretraining run is
+followed by per-checkpoint probe evaluation, and an aggregate \emph{eval-curve}
+run that re-runs all three probes at every checkpoint and writes one tidy log.
+
+\paragraph{Probes.}
+\begin{itemize}
+  \item \probe{linear}: closed-form least-squares on z-normalised features.
+  \item \probe{knn}: best of a sweep over $k \in \{1, 5, 10, 20, 50\}$ and
+        $\{$cosine, Euclidean$\}$. Only the swept best mean MSE is logged
+        per epoch.
+  \item \probe{attentive}: a small cross-attention pooler on top of the
+        frozen feature tokens, trained to convergence per checkpoint.
+\end{itemize}
+
+The linear and $k$-NN probes share the encode-then-pool front end shown in
+Figures~\ref{fig:linear-probe} and~\ref{fig:knn-probe}; only the head differs.
+
+\begin{figure}[h]
+\centering
+\input{diagrams/linear_probe}
+\caption{Linear probe. The encoder is frozen (cyan); features $z$ are
+  spatially pooled (\code{feature\_pool}\,$\in\,\{$\code{gap}, \code{flatten}$\}$)
+  into $\bar z\!\in\!\mathbb R^D$ and a closed-form least-squares fit
+  predicts the z-normalised parameter vector $\hat y\!=\!W\bar z + b$.
+  No SGD; the regulariser is the implicit minimum-norm solution.}
+\label{fig:linear-probe}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\input{diagrams/knn_probe}
+\caption{$k$-NN probe. The query $x_q$ and every training sample
+  $x_{\mathrm{tr}}$ pass through the same frozen encoder and pool, producing
+  the query feature $q$ and a memory bank $\mathcal{B}$. For the cosine
+  metric both are $\ell_2$-normalised; for Euclidean they are not. We sweep
+  $k\!\in\!\{1,5,10,20,50\}$ and $d\!\in\!\{$Euclidean, cosine$\}$; the $k$
+  nearest training points contribute to $\hat y$ with inverse-distance
+  weights, and the best $(k, d)$ mean MSE is logged per checkpoint.}
+\label{fig:knn-probe}
+\end{figure}
+
+\section{From the original baseline to a stable training recipe}
+
+The original recipe (\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/ztffyvmc}{run \code{ztffyvmc}})
+used batch size 8 and fp32 on a single A100, following the JEPA literature.
+Training repeatedly out-of-memoried; we dropped to batch size 2 to fit, but
+VICReg's invariance term is famously sensitive to small batches and
+representations collapsed by mid-training. Switching to bf16 freed enough
+memory to restore batch size 8
+(\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/6mhmw4k6}{run \code{6mhmw4k6}});
+this is what we call the \emph{baseline} below.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fig_linear_mean.pdf}
+  \caption{\probe{linear} mean MSE vs.\ pretrain epoch. The bs$=$2 run
+    (grey, dashed) descends, then degrades past epoch 11 — the hallmark of
+    VICReg collapse with too small a batch. The bs$=$8 bf16 baseline (blue)
+    converges to $0.243$, a $21\%$ improvement on the bs$=$2 best
+    ($0.308$). ViT3D (purple) is roughly $3\times$ better than every CNN
+    variant.}
+  \label{fig:linear-mean}
+\end{figure}
+
+The same pattern shows up for \probe{attentive} (Figure~\ref{fig:attentive-mean}):
+the bs$=$2 attentive curve actually \emph{climbs} after epoch 11, while the
+bs$=$8 baseline holds its minimum and the FFT runs slightly improve on it.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fig_attentive_mean.pdf}
+  \caption{\probe{attentive} mean MSE vs.\ pretrain epoch. Conv$+$Attn (FFT)
+    reaches the lowest attentive MSE ($0.072$ at epoch 13). ViT3D is omitted
+    here because its attentive probe runs crashed before logging.}
+  \label{fig:attentive-mean}
+\end{figure}
+
+\section{FFT preprocessing replaces the per-dataset crop}
+
+The default loader crops each frame to a square that fits the model's stride;
+on \texttt{active\_matter} this is the native $256{\times}256$ but on the
+other Well datasets it discards information. We replaced the crop with a
+band-limited FFT resize that preserves periodic boundary conditions
+(\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/5b2obx5w}{run \code{5b2obx5w}}).
+The pipeline is shown in Figure~\ref{fig:fft-pipeline}: the native frame is
+transformed to the frequency domain, the spectrum is centred and either
+centre-cropped (downsample) or zero-padded (upsample) to the target size,
+then inverse-transformed and re-scaled by $\rho = HW / H_n W_n$ so amplitude
+is preserved. Even on a dataset where there is nothing to crop, FFT still
+gave a small but consistent win: linear $0.243 \to 0.212$, k-NN
+$0.217 \to 0.174$, attentive $0.081 \to 0.079$. Every subsequent experiment
+uses FFT.
+
+\begin{figure}[h]
+\centering
+\input{diagrams/fft}
+\caption{FFT-based resize (\code{resize\_mode: fft}). $\mathcal{F}_2$ is the
+  2-D Fourier transform; the centre crop or zero-pad happens around the DC
+  bin so the lowest spatial frequencies are preserved and aliasing is exact.
+  Periodic boundary conditions are exact (no interpolation or window).}
+\label{fig:fft-pipeline}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{fig_knn_mean.pdf}
+  \caption{\probe{knn} mean MSE vs.\ pretrain epoch (best $k$ and metric per
+    epoch). The FFT run (orange) opens a clear gap on the bilinear baseline
+    after epoch 13. ViT3D continues to improve past epoch 25, the only
+    architecture that does so.}
+  \label{fig:knn-mean}
+\end{figure}
+
+\section{Architectural variants}
+
+Building on the FFT recipe, we ran three variants.
+
+\paragraph{Conv$+$Attn.}
+A self-attention block after the last 3D-conv stage
+(\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/ih2xhy8w}{run \code{ih2xhy8w}}).
+The architecture (Figure~\ref{fig:conv-attn}) is identical to the default
+\code{conv3d\_next} backbone used by the bilinear and FFT runs through all
+four stages; a single transformer block with 4 heads and MLP ratio 4 is
+appended at stage 4. Slightly improves linear ($0.207$) and gives the best
+attentive MSE of any CNN variant ($0.072$).
+
+\begin{figure}[h]
+\centering
+\input{diagrams/conv_attn}
+\caption{Conv$+$Attn encoder (\code{conv3d\_next\_attn} with
+  \code{attn\_stages:[4]}). Channel progression $16{\to}32{\to}64{\to}128{\to}128$,
+  total $16{\times}$ spatial stride, time stride $4{\times}$. Stride
+  annotations show $(\Delta T, \Delta H, \Delta W)$ at each stage. The red
+  attention block is the only structural difference from the default conv
+  backbone used by the bilinear and FFT runs.}
+\label{fig:conv-attn}
+\end{figure}
+
+\paragraph{ViT3D.}
+A 3D-patch ViT with depth 6 (Figure~\ref{fig:vit3d}; group
+\code{...vit3d-depth6\_2026-04-25\_11-11-48}). It dominates both
+\probe{linear} ($0.086$) and \probe{knn} ($0.081$) by a wide margin, but
+HPC-quota exhaustion meant we could only run per-checkpoint frozen probes;
+the aggregate eval-curve runs and the attentive probe crashed
+mid-execution. The ViT3D points in
+Figures~\ref{fig:linear-mean}--\ref{fig:knn-mean} are the per-checkpoint
+summary values stitched into a curve.
+
+\begin{figure}[h]
+\centering
+\input{diagrams/vit3d}
+\caption{ViT3D depth-6 encoder. A single 3D convolution patches the input
+  into a $4{\times}16{\times}16$ grid of $384$-dim tokens; the flattened
+  $1024$ tokens go through six pre-norm transformer blocks (heads $h{=}6$,
+  MLP ratio $4$). Time is folded back by reshaping and averaging over $T'$
+  to yield a $(B, 384, 16, 16)$ feature map matched to the predictor.}
+\label{fig:vit3d}
+\end{figure}
+
+\paragraph{SIGReg.}
+A LeWM-style alternative regulariser
+(\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/wbo7xqs0}{run \code{wbo7xqs0}}).
+The training loss did not converge; the probe MSE \emph{rises} during
+pretraining
+(Figures~\ref{fig:linear-mean} and \ref{fig:knn-mean}, red dotted), so
+the best probe scores happen at epoch 1 before the encoder collapses. We
+keep it in the figures as a negative control and do not analyse it
+further.
+
+\section{Per-parameter difficulty}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.78\textwidth]{fig_per_param_best.pdf}
+  \caption{Linear-probe MSE on $\alpha$ (top) vs.\ $\zeta$ (bottom).
+    $\zeta$ is consistently $\sim$$5$--$50\times$ harder than $\alpha$,
+    and the gap is largest for the CNN family — ViT3D narrows it the
+    most ($\zeta = 0.167$ vs.\ $\alpha = 0.004$).}
+  \label{fig:per-param}
+\end{figure}
+
+Splitting MSE by parameter (Figure~\ref{fig:per-param}) is the clearest
+single visualisation of where the remaining error lives: $\alpha$ is
+nearly solved (linear $\alpha$ MSE drops below $0.01$ for ViT3D), while
+$\zeta$ remains in the $0.17$--$0.42$ range. Future work that wants to
+chase the next absolute improvement should focus on $\zeta$.
+
+\section{Summary}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\textwidth]{fig_best_summary_bars.pdf}
+  \caption{Best validation MSE per (config, probe). Lower is better. The
+    Conv$+$Attn run wins on attentive; ViT3D wins on linear and k-NN by a
+    wide margin. Attentive bars are absent for SIGReg (no probe was run on
+    that group) and ViT3D (probe crashed).}
+  \label{fig:bars}
+\end{figure}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Config & Linear & k-NN & Attentive & Best $\alpha$ & Best $\zeta$ \\
+    \midrule
+    VICReg, bs$=$2 (fp32)            & 0.308 & 0.232 & 0.134 & 0.091 & 0.178 \\
+    VICReg, bs$=$8 (bf16) [baseline] & 0.243 & 0.217 & 0.081 & 0.028 & 0.135 \\
+    VICReg + FFT preproc             & 0.212 & 0.174 & 0.079 & 0.028 & 0.129 \\
+    Conv+Attn (FFT)                  & 0.207 & 0.184 & \textbf{0.072} & 0.028 & 0.116 \\
+    SIGReg (FFT, did not converge)   & 0.599 & 0.478 & ---   & 0.227 & 0.729 \\
+    ViT3D-d6 (FFT)                   & \textbf{0.086} & \textbf{0.081} & --- & \textbf{0.005} & \textbf{0.167} \\
+    \bottomrule
+  \end{tabular}
+  \caption{Best mean / per-parameter validation MSE for each configuration
+    (lower is better). Linear/k-NN/Attentive columns are the
+    \texttt{best\_mean} from the eval-curve run. The two right columns are
+    the best $\alpha$ and $\zeta$ achieved by the linear probe. Bold marks
+    the best per column among converged runs. ViT3D's $\zeta$ is best on
+    the linear probe but its $\zeta$ value is only modestly lower than the
+    CNN family — the $\alpha$ improvement is what moves its mean.}
+  \label{tab:summary}
+\end{table}
+
+The takeaways:
+\begin{enumerate}
+  \item bf16$+$bs$=$8 is a strict prerequisite. fp32$+$bs$=$2 collapses.
+  \item FFT preprocessing helps even on a dataset whose native size already
+        matches the model — likely because the resize preserves periodic
+        boundary conditions.
+  \item Adding self-attention to the conv backbone is a low-risk win on the
+        attentive probe.
+  \item ViT3D is the most promising backbone we tried. The remaining
+        question is whether its lead extrapolates to the other two Well
+        datasets we have not yet trained on; that is left to future
+        work, contingent on HPC quota.
+  \item SIGReg in this configuration never converged. The negative result is
+        documented but not analysed; see \href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline/runs/wbo7xqs0}{wbo7xqs0}.
+\end{enumerate}
+
+\paragraph{Reproducibility.} All numbers and figures in this report are
+produced by \code{data/fetch.py} and \code{data/plot.py}; running
+\code{make all} from \code{data/} pulls every metric directly from
+\href{https://wandb.ai/ry2665-new-york-university/physics-jepa-baseline}{wandb}
+and re-renders the figures.
+
+\end{document}

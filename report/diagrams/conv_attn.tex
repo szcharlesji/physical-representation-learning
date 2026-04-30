@@ -1,0 +1,29 @@
+% conv3d_next_attn encoder (default conv backbone with attn at stage 4).
+\begin{tikzpicture}[
+  node distance = 4mm and 4mm,
+  every node/.style = {font=\scriptsize, inner sep=1.5pt}]
+
+  \node[data]                                                  (x)    {$x$};
+  \node[op,    right=of x,  align=center]                       (stem) {Stem\\$1{\times}4{\times}4$\\$11{\to}16$};
+  \node[block, right=of stem, align=center, minimum width=15mm] (s0) {Stage 0\\$3{\times}$ ResB\\$16{\to}32$};
+  \node[block, right=of s0,   align=center, minimum width=15mm] (s1) {Stage 1\\$3{\times}$ ResB\\$32{\to}64$};
+  \node[block, right=of s1,   align=center, minimum width=15mm] (s2) {Stage 2\\$9{\times}$ ResB\\$64{\to}128$};
+  \node[block, right=of s2,   align=center, minimum width=15mm] (s3) {Stage 3\\$3{\times}$ ResB\\$128$};
+  \node[attn,  right=of s3,   align=center]                     (att) {Attn\\$h{=}4$};
+  \node[data,  right=of att]                                    (z)    {$z$};
+
+  \foreach \a/\b in {x/stem, stem/s0, s0/s1, s1/s2, s2/s3, s3/att, att/z}
+    \draw[arrow] (\a) -- (\b);
+
+  \node[meta, below=2mm of x]    {input};
+  \node[meta, below=2mm of stem] {stem};
+  \node[meta, below=2mm of s0]   {$\downarrow{\times}(2,2,2)$};
+  \node[meta, below=2mm of s1]   {$\downarrow{\times}(1,2,2)$};
+  \node[meta, below=2mm of s2]   {$\downarrow{\times}(2,2,2)$};
+  \node[meta, below=2mm of s3]   {$\downarrow{\times}(1,2,2)$};
+  \node[meta, below=2mm of att]  {only \texttt{cnn\_attn}};
+  \node[meta, below=2mm of z]    {output};
+
+  \node[meta, above=2mm of x]    {$(B,11,4,224,224)$};
+  \node[meta, above=2mm of z]    {$(B,128,1,14,14)$};
+\end{tikzpicture}

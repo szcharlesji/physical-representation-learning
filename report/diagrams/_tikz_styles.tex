@@ -1,0 +1,29 @@
+% Shared TikZ styles for architecture diagrams.
+% Inputted from report.tex preamble *after* \usepackage{tikz} and the
+% libraries arrows.meta / shapes.geometric / shapes.symbols / positioning / calc.
+\tikzset{
+  >=Stealth,
+  data/.style    = {draw, circle, minimum size=6.2mm, fill=blue!10,
+                    font=\scriptsize, inner sep=1pt},
+  enc/.style     = {draw, semicircle, shape border rotate=0,
+                    minimum width=8mm, minimum height=4mm, inner sep=1pt,
+                    fill=orange!30, font=\scriptsize},
+  frozen/.style  = {draw, semicircle, shape border rotate=0,
+                    minimum width=9mm, minimum height=4.5mm, inner sep=1pt,
+                    fill=cyan!18, font=\scriptsize},
+  pred/.style    = {draw, rounded rectangle,
+                    minimum width=9mm, minimum height=5mm, inner sep=2pt,
+                    fill=green!28, font=\scriptsize},
+  loss/.style    = {draw, rectangle, minimum size=5mm, fill=yellow!45,
+                    font=\scriptsize, inner sep=2pt},
+  op/.style      = {draw, rectangle, rounded corners=1pt,
+                    minimum width=11mm, minimum height=5mm, inner sep=2pt,
+                    fill=gray!12, font=\scriptsize, align=center},
+  block/.style   = {draw, rounded corners=2pt,
+                    minimum width=12mm, minimum height=8mm, inner sep=2pt,
+                    fill=blue!12, font=\scriptsize, align=center},
+  attn/.style    = {block, fill=red!15},
+  meta/.style    = {font=\tiny, gray!75, inner sep=1pt},
+  arrow/.style   = {->, semithick},
+  noarrow/.style = {->, semithick, dashed, gray!75},
+}

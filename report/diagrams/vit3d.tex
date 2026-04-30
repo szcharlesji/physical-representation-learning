@@ -1,0 +1,28 @@
+% ViT3D depth-6 encoder.
+\begin{tikzpicture}[
+  node distance = 6mm and 7mm,
+  every node/.style = {font=\scriptsize, inner sep=1.5pt}]
+
+  \node[data]                                                   (x)   {$x$};
+  \node[op,   right=of x,  minimum width=20mm, align=center]    (pe)  {3D PatchEmbed\\Conv3d $4{\times}16{\times}16$};
+  \node[op,   right=of pe, align=center]                        (pos) {$+\,\mathrm{PE}$};
+  \node[block, right=of pos, minimum width=20mm, align=center]  (blk) {Tx Block $\times\,6$\\$h{=}6$, MLP$\,{\times}4$};
+  \node[op,   right=of blk, align=center]                       (rs)  {reshape};
+  \node[op,   right=of rs,  align=center]                       (mt)  {mean$_{T'}$};
+  \node[data, right=of mt]                                      (z)   {$z$};
+
+  \foreach \a/\b in {x/pe, pe/pos, pos/blk, blk/rs, rs/mt, mt/z}
+    \draw[arrow] (\a) -- (\b);
+
+  \node[meta, above=2mm of x]   {$(B,2,16,256,256)$};
+  \node[meta, above=2mm of z]   {$(B,384,16,16)$};
+  \node[meta, below=2mm of pe]  {patches $4{\times}16{\times}16$};
+  \node[meta, below=2mm of pos] {$(B,1024,384)$};
+  \node[meta, below=2mm of rs]  {$(B,4,16,16,384)$};
+
+  % Block internals shown beneath
+  \node[block, below=10mm of blk, minimum width=58mm,
+        align=center, font=\tiny]
+    (blkin) {LN $\to$ MHA(6h) $\,\oplus\,$ LN $\to$ MLP$_{\times 4}$ $\,\oplus\,$};
+  \draw[noarrow, thin] (blk.south) -- (blkin.north);
+\end{tikzpicture}
