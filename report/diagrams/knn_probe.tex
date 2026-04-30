@@ -1,0 +1,44 @@
+% k-NN probe: query vs training memory bank, both encoded by the same frozen f_theta.
+\begin{tikzpicture}[
+  node distance = 5mm and 8mm,
+  every node/.style = {font=\scriptsize, inner sep=1.5pt}]
+
+  % Top row: query path
+  \node[data]                       (xq)   {$x_q$};
+  \node[frozen, right=of xq]        (enc)  {$f_{\theta}$};
+  \node[op,   right=of enc]         (pool) {pool};
+  \node[op,   right=of pool]        (norm) {$\ell_{2}$};
+  \node[data, right=of norm]        (q)    {$q$};
+
+  % Bottom row: memory bank
+  \node[data, below=14mm of xq]     (xt)   {$x_{\mathrm{tr}}$};
+  \node[frozen, right=of xt]        (enc2) {$f_{\theta}$};
+  \node[op,   right=of enc2]        (pool2){pool};
+  \node[op,   right=of pool2]       (norm2){$\ell_{2}$};
+  \node[data, right=of norm2]       (B)    {$\mathcal{B}$};
+
+  % Right column: search and prediction (vertically centred between rows)
+  \node[op, right=12mm of q, yshift=-9mm,
+        minimum width=18mm, align=center]   (knn) {top-$k$\\search};
+  \node[op, right=of knn, align=center]     (idw) {$1/d$\\weight};
+  \node[data, right=of idw]                 (yh)  {$\hat y$};
+  \node[loss, right=of yh]                  (mse) {MSE};
+  \node[data, below=of mse]                 (y)   {$y_z$};
+
+  % Edges
+  \foreach \a/\b in {xq/enc, enc/pool, pool/norm, norm/q,
+                     xt/enc2, enc2/pool2, pool2/norm2, norm2/B}
+    \draw[arrow] (\a) -- (\b);
+  \draw[arrow] (q) -| (knn.north);
+  \draw[arrow] (B) -| (knn.south);
+  \draw[arrow] (knn) -- (idw);
+  \draw[arrow] (idw) -- (yh);
+  \draw[arrow] (yh)  -- (mse);
+  \draw[arrow] (y)   -- (mse);
+
+  % Annotations
+  \node[meta, below=2mm of xq]   {query};
+  \node[meta, below=2mm of xt]   {train set};
+  \node[meta, below=2mm of norm] {(cosine only)};
+  \node[meta, below=2mm of B, yshift=-1mm] {memory bank};
+\end{tikzpicture}
