@@ -17,3 +17,4 @@ datasets/
 *.err
 *.out
 repomix-output.xml
+.DS_STORE
