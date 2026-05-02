@@ -22,6 +22,9 @@ import copy
 import sys
 from pathlib import Path
 
+# Repo-root on sys.path so `python scripts/diag_old_val_split.py` works without PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import torch
 from omegaconf import OmegaConf
 
