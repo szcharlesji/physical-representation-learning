@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=csci_ga_2590_001-2026sp
-#SBATCH --partition=c12m85-a100-1
+#SBATCH --partition=g2-standard-12
 #SBATCH --job-name=jepa-eval-frozen
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
-PROBES="${2:-linear knn attentive}"   # space-separated, e.g. "linear knn"
+PROBES="${2:-linear knn attentive}" # space-separated, e.g. "linear knn"
 # Default to clean (no-noise) eval at the run's training resolution. Set $3 to
 # "" to use the run config exactly, or pass another dotlist to change.
 # - train.noise_std=0.0     -> _resolved_noise_std() falls back to this when ft is unset
@@ -56,8 +56,8 @@ if [[ ! -f "$RUN_CONFIG" ]]; then
 fi
 
 # Per-checkpoint output dir mirrors post_train_probes' layout.
-CKPT_BASE=$(basename "$CKPT" .pth)               # e.g. ConvEncoder_11
-RUN_DIR=$(basename "$RUN_DIR_FULL")              # e.g. vit3d-depth6_2026-04-24...
+CKPT_BASE=$(basename "$CKPT" .pth)  # e.g. ConvEncoder_11
+RUN_DIR=$(basename "$RUN_DIR_FULL") # e.g. vit3d-depth6_2026-04-24...
 OUT_DIR="$REPO/frozen_eval_out/$RUN_DIR/$CKPT_BASE"
 
 echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
