@@ -255,10 +255,26 @@ def _cli_main() -> int:
         default=None,
         help="Probe subset to run (defaults to cfg.post_train_eval.probes)",
     )
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        default=[],
+        help=(
+            "Hydra-style dotlist overrides applied on top of the loaded "
+            "config (e.g. `dataset.resolution=224 train.noise_std=0.0`)"
+        ),
+    )
     args = parser.parse_args()
 
     cfg = OmegaConf.load(args.config)
     OmegaConf.set_struct(cfg, False)
+    if args.overrides:
+        # Merge dotlist overrides; e.g. resize to 224 + clean inputs:
+        #   dataset.resolution=224 train.noise_std=0.0 ft.noise_std=0.0
+        # OmegaConf.from_dotlist handles type coercion (ints, floats, lists).
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(args.overrides)))
+        OmegaConf.set_struct(cfg, False)
+        print(f"[post_train_eval] applied overrides: {args.overrides}", flush=True)
     _clear_dist_env()
     run_probes_on_checkpoint(cfg, args.checkpoint, probes=args.probes)
     return 0

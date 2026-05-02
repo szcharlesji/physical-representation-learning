@@ -10,12 +10,29 @@
 #SBATCH --output=eval_%j.out
 #SBATCH --error=eval_%j.err
 
-# usage: sbatch eval.sbatch /scratch/$USER/physical-representation-learning/checkpoints/<run>/ConvEncoder_<epoch>.pth
+# usage:
+#   sbatch eval.sbatch <ckpt.pth> [<probes>] [<overrides>]
+#
+# Defaults: probes="linear knn attentive", overrides resize the inputs to
+# 224x224 and disable Gaussian noise on the eval loader so the encoder is
+# probed under clean low-res conditions. Override `OVERRIDES` (3rd arg) to
+# match training config exactly:
+#   sbatch eval.sbatch <ckpt> "linear knn" ""        # use the run's config as-is
+#   sbatch eval.sbatch <ckpt> "linear knn" "dataset.resolution=256 train.noise_std=1.0"
+#
+# `OVERRIDES` is a single shell-quoted, space-separated string of Hydra-style
+# dotlist overrides (post_train_probes.py's positional `overrides` arg).
 
 set -euo pipefail
 
 CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
 PROBES="${2:-linear knn attentive}"   # space-separated, e.g. "linear knn"
+# Default to clean 224 eval. Set $3 to "" or another dotlist to change.
+# - dataset.resolution=224  -> resize all frames to 224x224 (resize_mode left as
+#   pretrain's, so FFT-pretrained models evaluate via FFT-resize, bilinear via bilinear)
+# - train.noise_std=0.0     -> _resolved_noise_std() falls back to this when ft is unset
+# - ft.noise_std=0.0        -> belt-and-suspenders for paths that read ft.noise_std first
+OVERRIDES="${3:-dataset.resolution=224 train.noise_std=0.0 ft.noise_std=0.0}"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
@@ -41,6 +58,7 @@ echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
 echo "checkpoint: $CKPT"
 echo "run config: $RUN_CONFIG"
 echo "probes:     $PROBES"
+echo "overrides:  $OVERRIDES"
 echo "out dir:    $OUT_DIR"
 nvidia-smi
 
@@ -57,7 +75,8 @@ singularity exec --nv \
     python -m physics_jepa.post_train_probes \
       --config $RUN_CONFIG \
       --checkpoint $CKPT \
-      --probes $PROBES
+      --probes $PROBES \
+      $OVERRIDES
   "
 
 echo "[$(date)] Done — frozen results at $OUT_DIR/results.json"
