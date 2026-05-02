@@ -61,3 +61,4 @@ singularity exec --nv \
   "
 
 echo "[$(date)] Done — frozen results at $OUT_DIR/results.json"
+echo "Headline TEST MSE printed above; rows with split=test are the real held-out numbers."

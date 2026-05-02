@@ -273,6 +273,40 @@ class FrozenEvaluator:
             print("  ".join(fmt(v, w) for v, w in zip(row, widths)))
         print(sep)
 
+        # Headline TEST MSE (real held-out test split). Linear has a single
+        # row; kNN reports the (k, metric) selected by val mean (knn_best tag
+        # on the test row). Printed prominently so the user can paste these
+        # numbers straight into the report table without grepping the table.
+        linear_test = next(
+            (r for r in results
+             if r["probe_type"] == "linear" and r["split"] == "test"),
+            None,
+        )
+        knn_at_best_val_test = next(
+            (r for r in results
+             if r["probe_type"] == "knn_best" and r["split"] == "test"),
+            None,
+        )
+        print()
+        print("=" * 70)
+        print("HEADLINE TEST MSE (real held-out data/test/ split)")
+        print("=" * 70)
+        if linear_test is not None:
+            print(
+                f"  linear:  mean={linear_test['mse_mean']:.4f}  "
+                f"alpha={linear_test['mse_alpha']:.4f}  "
+                f"zeta={linear_test['mse_zeta']:.4f}"
+            )
+        if knn_at_best_val_test is not None:
+            print(
+                f"  knn   :  mean={knn_at_best_val_test['mse_mean']:.4f}  "
+                f"alpha={knn_at_best_val_test['mse_alpha']:.4f}  "
+                f"zeta={knn_at_best_val_test['mse_zeta']:.4f}  "
+                f"(k={knn_at_best_val_test['k']}, "
+                f"metric={knn_at_best_val_test['metric']}, selected by val)"
+            )
+        print("=" * 70)
+
         payload = {
             "checkpoint": str(Path(self.checkpoint_path).resolve()),
             "dataset": self.cfg.dataset.name,
