@@ -9,88 +9,118 @@ If the old number (e.g. ai3ktxmv val=0.0857 on ViT3DEncoder_5) was just due to
 the seed-42 first half of valid being easier, this script will reproduce
 ~0.0857 from the SAME cached features the new code uses. If instead it
 reports the new ~0.155, the half-vs-full subsetting is NOT the explanation
-and something else changed (data on disk, feature extraction path, etc.).
+and something else changed.
 
-Usage on the HPC:
-  cd /scratch/$USER/physical-representation-learning
-  python scripts/diag_old_val_split.py \
-    /scratch/$USER/physical-representation-learning/checkpoints_vit3d/active_matter-16frames-vit3d-jepa-vit3d-depth6_2026-04-25_11-11-48/ViT3DEncoder_5.pth \
-    --feature-cache feature_cache --seed 42
-
-  # (optional) point at a different feature_cache_dir if not the default.
+Resolution: this version constructs the cache hash via FrozenEvaluator._cache_key
+on the run's actual config.yaml (with the same overrides applied as the eval
+run), which avoids drift from manually stringifying resolution/resize_mode/etc.
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
+import copy
+import sys
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
-
-def cache_key(
-    ckpt_path: str,
-    split: str,
-    dataset_name: str,
-    num_frames: int,
-    resolution,
-    resize_mode: str,
-    feature_pool: str,
-    noise_std: float,
-) -> str:
-    """Mirror physics_jepa.eval_frozen.FrozenEvaluator._cache_key (current)."""
-    s = "|".join([
-        str(Path(ckpt_path).resolve()),
-        split,
-        dataset_name,
-        str(num_frames),
-        str(resolution),
-        resize_mode,
-        feature_pool,
-        f"noise={float(noise_std)}",
-    ])
-    return hashlib.sha1(s.encode()).hexdigest()[:16]
+from physics_jepa.eval_frozen import FrozenEvaluator
+from physics_jepa.post_train_probes import _load_ft_block
 
 
 def lstsq_fit(X_tr: torch.Tensor, Y_tr: torch.Tensor):
     Xb = torch.cat([X_tr, torch.ones(X_tr.size(0), 1, dtype=X_tr.dtype)], dim=1)
-    sol = torch.linalg.lstsq(Xb, Y_tr).solution  # (D+1, P)
-    W = sol[:-1].T  # (P, D)
-    b = sol[-1]    # (P,)
+    sol = torch.linalg.lstsq(Xb, Y_tr).solution
+    W = sol[:-1].T
+    b = sol[-1]
     return W, b
 
 
 def per_param_mse(pred: torch.Tensor, y: torch.Tensor) -> dict:
-    err = (pred - y).pow(2).mean(0)  # (P,)
-    return {
-        "mse_per_param": err.tolist(),
-        "mse_mean": err.mean().item(),
-    }
+    err = (pred - y).pow(2).mean(0)
+    return {"mse_per_param": err.tolist(), "mse_mean": err.mean().item()}
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("ckpt")
-    p.add_argument("--feature-cache", default="feature_cache")
-    p.add_argument("--dataset", default="active_matter")
-    p.add_argument("--num-frames", type=int, default=16)
-    p.add_argument("--resolution", default="[256, 256]",
-                   help="String form as it appears in config (e.g. `[256, 256]` or `224`)")
-    p.add_argument("--resize-mode", default="fft")
-    p.add_argument("--pool", default="gap")
-    p.add_argument("--noise", type=float, default=0.0,
-                   help="Resolved noise_std used in the run that wrote the cache")
+    p.add_argument("--config", required=True, help="Run config.yaml path")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument(
+        "--frozen-config",
+        default="configs/train_activematter_frozen.yaml",
+        help="ft block to swap in (matches post_train_probes.run_frozen_probes)",
+    )
+    p.add_argument(
+        "overrides",
+        nargs="*",
+        default=[],
+        help="Hydra-style dotlist overrides applied on top of the loaded config "
+             "(should match the eval run that wrote the caches, e.g. "
+             "`train.noise_std=0.0 ft.noise_std=0.0`)",
+    )
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
-    cache_dir = Path(args.feature_cache)
-    train_path = cache_dir / f"{cache_key(args.ckpt, 'train', args.dataset, args.num_frames, args.resolution, args.resize_mode, args.pool, args.noise)}.pt"
-    val_path = cache_dir / f"{cache_key(args.ckpt, 'val', args.dataset, args.num_frames, args.resolution, args.resize_mode, args.pool, args.noise)}.pt"
+    # Reproduce the cfg construction in post_train_probes.run_frozen_probes,
+    # post-CLI-override:
+    cfg = OmegaConf.load(args.config)
+    OmegaConf.set_struct(cfg, False)
+    if args.overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(args.overrides)))
+        OmegaConf.set_struct(cfg, False)
 
+    # post_train_probes.run_frozen_probes deep-copies pretrain_cfg, swaps
+    # ft = frozen_config.ft, sets eval_mode/run_name/out_dir/seed/dry_run.
+    cfg = copy.deepcopy(cfg)
+    OmegaConf.set_struct(cfg, False)
+    cfg.ft = copy.deepcopy(_load_ft_block(args.frozen_config))
+    cfg.ft.eval_mode = "linear_and_knn"
+    cfg.ft.run_name = None
+    base_out = Path(cfg.ft.get("out_dir", "./frozen_eval_out"))
+    ckpt = Path(args.checkpoint)
+    cfg.ft.out_dir = str(base_out / ckpt.parent.name / ckpt.stem)
+    cfg.seed = cfg.get("seed", 42)
+    cfg.dry_run = cfg.get("dry_run", False)
+
+    # IMPORTANT: re-apply ft.* overrides from the CLI dotlist, since `cfg.ft`
+    # was just replaced wholesale by frozen_config's ft block. Mirrors the
+    # subtle bug in post_train_probes that we don't want to recreate here.
+    if args.overrides:
+        ft_overrides = [o for o in args.overrides if o.startswith("ft.")]
+        if ft_overrides:
+            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(ft_overrides))
+            OmegaConf.set_struct(cfg, False)
+
+    # Construct evaluator just to get _cache_key + cache_dir; don't run anything.
+    # FrozenEvaluator.__init__ doesn't load the encoder, so this is cheap.
+    ev = FrozenEvaluator(cfg, checkpoint_path=str(ckpt))
+
+    train_path = ev.cache_dir / f"{ev._cache_key('train')}.pt"
+    val_path = ev.cache_dir / f"{ev._cache_key('val')}.pt"
+    test_path = ev.cache_dir / f"{ev._cache_key('test')}.pt"
+
+    print(f"feature_cache_dir: {ev.cache_dir}")
+    print(f"resolved noise:    {ev._resolved_noise_std()}")
+    print(f"feature_pool:      {ev.feature_pool}")
+    print(f"resolution:        {cfg.dataset.get('resolution', None)}")
+    print(f"resize_mode:       {cfg.dataset.get('resize_mode', None)}")
+    print()
     print(f"train cache: {train_path}  exists={train_path.exists()}")
     print(f"val   cache: {val_path}    exists={val_path.exists()}")
+    print(f"test  cache: {test_path}   exists={test_path.exists()}")
+
     if not (train_path.exists() and val_path.exists()):
-        raise SystemExit("missing caches; check --resolution / --resize-mode / --noise match the run that wrote them")
+        print()
+        print("Listing all *.pt under feature_cache to help match by hand:")
+        for f in sorted(ev.cache_dir.glob("*.pt")):
+            try:
+                d = torch.load(f, map_location="cpu", weights_only=True)
+                shape = tuple(d["features"].shape) if "features" in d else "?"
+            except Exception as e:
+                shape = f"<load err: {e}>"
+            print(f"  {f.name}  features={shape}")
+        sys.exit(1)
 
     train_f = torch.load(train_path)
     val_f = torch.load(val_path)
@@ -106,19 +136,15 @@ def main():
     W, b = lstsq_fit(train_f["features"], Y_tr)
     pred_full = val_f["features"] @ W.T + b
 
-    # Full val (what new code reports as "val")
     full = per_param_mse(pred_full, Y_va)
 
-    # Old code's val: first half of seed-42 randperm
+    # Old code: torch.Generator().manual_seed(cfg.seed); randperm(N)
     N = val_f["features"].shape[0]
     g = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(N, generator=g)
     half = N // 2
-    val_idx = perm[:half]
-    test_idx = perm[half:]
-
-    val_half = per_param_mse(pred_full[val_idx], Y_va[val_idx])
-    test_half = per_param_mse(pred_full[test_idx], Y_va[test_idx])
+    val_half = per_param_mse(pred_full[perm[:half]], Y_va[perm[:half]])
+    test_half = per_param_mse(pred_full[perm[half:]], Y_va[perm[half:]])
 
     print()
     print("=" * 70)
@@ -128,11 +154,6 @@ def main():
     print(f"  old 'val'  (first {half} of seed-{args.seed} randperm)  mse_mean={val_half['mse_mean']:.4f}   per_param={[f'{x:.4f}' for x in val_half['mse_per_param']]}")
     print(f"  old 'test' (last {N-half} of seed-{args.seed} randperm)  mse_mean={test_half['mse_mean']:.4f}   per_param={[f'{x:.4f}' for x in test_half['mse_per_param']]}")
     print("=" * 70)
-    print()
-    print("If 'old val' here matches the Apr-25 ai3ktxmv val number, the half-vs-full")
-    print("subsetting is the entire delta — full valid is genuinely harder than the")
-    print("seed-42 first half. If 'old val' here is close to 'full val', something")
-    print("else (data on disk, feature extraction) changed and the diagnostic clears it.")
 
 
 if __name__ == "__main__":

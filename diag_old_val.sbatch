@@ -10,29 +10,37 @@
 #SBATCH --error=diag_%j.err
 
 # usage:
-#   sbatch diag_old_val.sbatch <ckpt.pth> [<resolution>] [<resize_mode>] [<noise>]
+#   sbatch diag_old_val.sbatch <ckpt.pth> [<overrides>]
 #
-# Defaults match a vit3d-depth6 active_matter run extracted under the new
-# (post-fix) eval.sbatch defaults: resolution=[256, 256], resize_mode=fft,
-# noise=0.0. If your run had different settings, override here so the cache
-# hash matches what's on disk.
+# <overrides>: single shell-quoted dotlist string applied to the run's
+# config.yaml, mirroring eval.sbatch's 3rd arg. Default matches eval.sbatch's
+# default (clean-noise eval at the run's training resolution), so the cache
+# hash matches whatever your y8naqdos / pcyd4gb7 runs wrote.
+#
+# Example:
+#   sbatch diag_old_val.sbatch <ckpt> "train.noise_std=1.0"
+#       # if the cache you want to inspect was written with noise=1.0
 
 set -euo pipefail
 
 CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
-RESOLUTION="${2:-[256, 256]}"
-RESIZE_MODE="${3:-fft}"
-NOISE="${4:-0.0}"
+OVERRIDES="${2:-train.noise_std=0.0 ft.noise_std=0.0}"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
 IMAGE=/share/apps/images/cuda13.0.1-cudnn9.13.0-ubuntu-24.04.3.sif
 
+RUN_DIR_FULL=$(dirname "$CKPT")
+RUN_CONFIG="$RUN_DIR_FULL/config.yaml"
+if [[ ! -f "$RUN_CONFIG" ]]; then
+  echo "ERROR: $RUN_CONFIG not found."
+  exit 2
+fi
+
 echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
 echo "checkpoint: $CKPT"
-echo "resolution: $RESOLUTION"
-echo "resize:     $RESIZE_MODE"
-echo "noise:      $NOISE"
+echo "run config: $RUN_CONFIG"
+echo "overrides:  $OVERRIDES"
 
 singularity exec \
   --overlay "$OVERLAY:ro" \
@@ -42,11 +50,9 @@ singularity exec \
     conda activate jepa
     cd $REPO
     python scripts/diag_old_val_split.py \
-      '$CKPT' \
-      --feature-cache feature_cache \
-      --resolution '$RESOLUTION' \
-      --resize-mode '$RESIZE_MODE' \
-      --noise '$NOISE'
+      --config $RUN_CONFIG \
+      --checkpoint $CKPT \
+      $OVERRIDES
   "
 
 echo "[$(date)] Done."
