@@ -2,6 +2,11 @@
 
 Standalone alternative to finetuner.py's attentive-probe path. The existing
 attentive-probe flow in finetuner.py is untouched.
+
+Reports per-param + mean MSE on **both val and test** splits. Linear is fit
+once via lstsq on train and predicted on val and test; kNN sweeps (k, metric),
+selects the best pair by val mean MSE, and reports val+test metrics for every
+swept pair so the wandb panel shows the val/test gap directly.
 """
 import argparse
 import hashlib
@@ -197,20 +202,18 @@ class FrozenEvaluator:
         encoder = self.load_encoder()
         train_f = self.extract_features(encoder, "train")
         val_f = self.extract_features(encoder, "val")
+        # Held-out test split (The Well exposes train/valid/test natively).
+        # Cached separately from val via _cache_key's split component.
+        test_f = self.extract_features(encoder, "test")
         del encoder
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-        # No held-out test split: data.py exposes only train/val and the user
-        # wants linear/kNN/attentive to evaluate on identical val data. The
-        # earlier half-split of val into val/test was an internal addition
-        # that broke parity with the attentive probe — dropped here.
 
         mean = train_f["labels_raw"].mean(0)
         std = train_f["labels_raw"].std(0).clamp_min(1e-8)
         self._y_mean = mean
         self._y_std = std
-        for s in (train_f, val_f):
+        for s in (train_f, val_f, test_f):
             s["labels"] = (s["labels_raw"] - mean) / std
 
         print(
@@ -219,7 +222,8 @@ class FrozenEvaluator:
         )
         print(
             f"train={tuple(train_f['features'].shape)} "
-            f"val={tuple(val_f['features'].shape)}",
+            f"val={tuple(val_f['features'].shape)} "
+            f"test={tuple(test_f['features'].shape)}",
             flush=True,
         )
 
@@ -237,9 +241,9 @@ class FrozenEvaluator:
 
         results: List[Dict] = []
         if self.eval_mode in ("linear", "linear_and_knn"):
-            results += self.run_linear(train_f, val_f)
+            results += self.run_linear(train_f, val_f, test_f)
         if self.eval_mode in ("knn", "linear_and_knn"):
-            results += self.run_knn(train_f, val_f)
+            results += self.run_knn(train_f, val_f, test_f)
         self._finish_wandb()
 
         self._report(results, mean=mean.tolist(), std=std.tolist())
@@ -302,7 +306,7 @@ class FrozenEvaluator:
         out["mse_mean_raw"] = float(err_r.mean().item())
         return out
 
-    def run_linear(self, train_f, val_f) -> List[Dict]:
+    def run_linear(self, train_f, val_f, test_f) -> List[Dict]:
         lin_cfg = self.cfg.ft.linear
         X = train_f["features"]
         Y = train_f["labels"]
@@ -318,13 +322,24 @@ class FrozenEvaluator:
             b = torch.zeros(Y.size(1), dtype=Y.dtype)
 
         out: List[Dict] = []
-        pred = val_f["features"] @ W.T + b
-        val_metrics = self._per_param_mse(pred, val_f["labels"])
+        # Predict on val and test using the same lstsq solution.
+        val_pred = val_f["features"] @ W.T + b
+        val_metrics = self._per_param_mse(val_pred, val_f["labels"])
         out.append({"probe_type": "linear", "k": None, "metric": None,
                     "split": "val", **val_metrics})
         print(
-            f"[linear] split=val  mse_mean={val_metrics['mse_mean']:.4f} "
+            f"[linear] split=val   mse_mean={val_metrics['mse_mean']:.4f} "
             f"mse_mean_raw={val_metrics['mse_mean_raw']:.4f}",
+            flush=True,
+        )
+
+        test_pred = test_f["features"] @ W.T + b
+        test_metrics = self._per_param_mse(test_pred, test_f["labels"])
+        out.append({"probe_type": "linear", "k": None, "metric": None,
+                    "split": "test", **test_metrics})
+        print(
+            f"[linear] split=test  mse_mean={test_metrics['mse_mean']:.4f} "
+            f"mse_mean_raw={test_metrics['mse_mean_raw']:.4f}",
             flush=True,
         )
 
@@ -338,14 +353,20 @@ class FrozenEvaluator:
                 "linear/val_mse_raw": val_metrics["mse_mean_raw"],
                 "linear/val_mse_alpha": val_metrics["mse_alpha"],
                 "linear/val_mse_zeta": val_metrics["mse_zeta"],
+                "linear/test_mse": test_metrics["mse_mean"],
+                "linear/test_mse_raw": test_metrics["mse_mean_raw"],
+                "linear/test_mse_alpha": test_metrics["mse_alpha"],
+                "linear/test_mse_zeta": test_metrics["mse_zeta"],
             })
             wandb.run.summary["linear/val_mse"] = val_metrics["mse_mean"]
             wandb.run.summary["linear/val_mse_raw"] = val_metrics["mse_mean_raw"]
+            wandb.run.summary["linear/test_mse"] = test_metrics["mse_mean"]
+            wandb.run.summary["linear/test_mse_raw"] = test_metrics["mse_mean_raw"]
         return out
 
 
     # --------------------------------------------------------------------- knn
-    def run_knn(self, train_f, val_f) -> List[Dict]:
+    def run_knn(self, train_f, val_f, test_f) -> List[Dict]:
         knn_cfg = self.cfg.ft.knn
         chunk = int(knn_cfg.get("chunk_size", 1024))
         eps = 1e-8
@@ -385,27 +406,40 @@ class FrozenEvaluator:
                 if k > x_tr.size(0):
                     print(f"[knn] skipping k={k} > n_train={x_tr.size(0)}", flush=True)
                     continue
-                pred = predict(val_f["features"], x_tr, y_tr, k, metric)
-                metrics = self._per_param_mse(pred, val_f["labels"])
+                # Compute val and test predictions for the same (k, metric).
+                # Selection is by val mean; test is reported alongside.
+                val_pred = predict(val_f["features"], x_tr, y_tr, k, metric)
+                val_metrics = self._per_param_mse(val_pred, val_f["labels"])
                 out.append({"probe_type": "knn", "k": k, "metric": metric,
-                            "split": "val", **metrics})
-                if best is None or metrics["mse_mean"] < best["val_mse_mean"]:
+                            "split": "val", **val_metrics})
+
+                test_pred = predict(test_f["features"], x_tr, y_tr, k, metric)
+                test_metrics = self._per_param_mse(test_pred, test_f["labels"])
+                out.append({"probe_type": "knn", "k": k, "metric": metric,
+                            "split": "test", **test_metrics})
+
+                if best is None or val_metrics["mse_mean"] < best["val_mse_mean"]:
                     best = {
                         "k": k, "metric": metric,
-                        "val_mse_mean": metrics["mse_mean"],
+                        "val_mse_mean": val_metrics["mse_mean"],
+                        "test_mse_mean": test_metrics["mse_mean"],
                     }
                 print(
-                    f"[knn] k={k:3d} metric={metric:9s} split=val  "
-                    f"mse_mean={metrics['mse_mean']:.4f} "
-                    f"mse_mean_raw={metrics['mse_mean_raw']:.4f}",
+                    f"[knn] k={k:3d} metric={metric:9s}  "
+                    f"val_mean={val_metrics['mse_mean']:.4f}  "
+                    f"test_mean={test_metrics['mse_mean']:.4f}",
                     flush=True,
                 )
                 if self._wandb_on:
                     wandb.log({
-                        f"knn/{metric}/k{k}_val_mse_mean": metrics["mse_mean"],
-                        f"knn/{metric}/k{k}_val_mse_mean_raw": metrics["mse_mean_raw"],
-                        "knn/sweep_val_mse": metrics["mse_mean"],
-                        "knn/sweep_val_mse_raw": metrics["mse_mean_raw"],
+                        f"knn/{metric}/k{k}_val_mse_mean": val_metrics["mse_mean"],
+                        f"knn/{metric}/k{k}_val_mse_mean_raw": val_metrics["mse_mean_raw"],
+                        f"knn/{metric}/k{k}_test_mse_mean": test_metrics["mse_mean"],
+                        f"knn/{metric}/k{k}_test_mse_mean_raw": test_metrics["mse_mean_raw"],
+                        "knn/sweep_val_mse": val_metrics["mse_mean"],
+                        "knn/sweep_val_mse_raw": val_metrics["mse_mean_raw"],
+                        "knn/sweep_test_mse": test_metrics["mse_mean"],
+                        "knn/sweep_test_mse_raw": test_metrics["mse_mean_raw"],
                         "knn/sweep_k": k,
                         "knn/sweep_metric_is_cosine": 1 if metric == "cosine" else 0,
                         "knn/sweep_step": step,
@@ -413,7 +447,8 @@ class FrozenEvaluator:
                 step += 1
 
         if best is not None:
-            # Add a knn_best row using the best val config
+            # Tag the val and test rows of the best-by-val pair with knn_best.
+            # Both rows are kept so eval_run.py can pull either split.
             for r in out:
                 if (
                     r["probe_type"] == "knn"
@@ -422,8 +457,12 @@ class FrozenEvaluator:
                 ):
                     out.append({**r, "probe_type": "knn_best"})
             if self._wandb_on:
-                wandb.log({"knn/best_val_mse": best["val_mse_mean"]})
+                wandb.log({
+                    "knn/best_val_mse": best["val_mse_mean"],
+                    "knn/best_test_mse": best["test_mse_mean"],
+                })
                 wandb.run.summary["knn/best_val_mse"] = best["val_mse_mean"]
+                wandb.run.summary["knn/best_test_mse"] = best["test_mse_mean"]
                 wandb.run.summary["knn/best_k"] = best["k"]
                 wandb.run.summary["knn/best_metric"] = best["metric"]
         return out
