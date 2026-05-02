@@ -6,7 +6,13 @@ from functools import partial
 from einops import rearrange
 from collections import defaultdict
 
-from physics_jepa.utils.model_utils import ConvEncoder, ConvPredictor, ConvDecoder, ViT3DEncoder
+from physics_jepa.utils.model_utils import (
+    ConvEncoder,
+    ConvEncoderViTStem,
+    ConvPredictor,
+    ConvDecoder,
+    ViT3DEncoder,
+)
 
 
 def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
@@ -18,6 +24,10 @@ def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
       An empty list produces a structurally identical encoder to
       `conv3d_next` (no added parameters).
     - `vit3d`: ViT3DEncoder with 3D patch embedding and transformer stack.
+    - `conv3d_next_vit_stem`: ConvEncoderViTStem - ViT-style 3D patchify
+      (same kernel/stride as vit3d) feeding a single attention block. No
+      pos embed, no residual blocks. Tokenization-only ablation against
+      vit3d (depth-6) and conv3d_next_attn (attn at last conv stage).
     """
     backbone = None
     if hasattr(model_cfg, "get"):
@@ -34,6 +44,27 @@ def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
             attn_stages=attn_stages,
             attn_num_heads=int(model_cfg.get("attn_num_heads", 4)),
             attn_mlp_ratio=float(model_cfg.get("attn_mlp_ratio", 4.0)),
+            attn_depth=int(model_cfg.get("attn_depth", 1)),
+        )
+        return encoder
+
+    if backbone == "conv3d_next_vit_stem":
+        # ViT-style tokenization (Conv3d patchify) + 1 attn block. Reads
+        # `model.vit3d.{patch_size,embed_dim,num_heads,mlp_ratio}` so the
+        # tokenization knobs are configured the same way as `vit3d`.
+        vit_cfg = model_cfg.get("vit3d", {}) if hasattr(model_cfg, "get") else {}
+        vit_cfg = vit_cfg or {}
+        if img_size is None:
+            img_size = 256
+        patch = list(vit_cfg.get("patch_size", [4, 16, 16]))
+        encoder = ConvEncoderViTStem(
+            in_chans=in_chans,
+            num_frames=num_frames,
+            img_size=img_size,
+            patch_size=tuple(patch),
+            embed_dim=int(vit_cfg.get("embed_dim", model_cfg.dims[-1] if hasattr(model_cfg, "dims") else 384)),
+            num_heads=int(vit_cfg.get("num_heads", 6)),
+            mlp_ratio=float(vit_cfg.get("mlp_ratio", 4.0)),
         )
         return encoder
 
@@ -55,7 +86,10 @@ def build_encoder(model_cfg, num_frames: int, in_chans: int, img_size=None):
         )
         return encoder
 
-    raise ValueError(f"unknown model.backbone: {backbone!r}; expected conv3d_next|conv3d_next_attn|vit3d")
+    raise ValueError(
+        f"unknown model.backbone: {backbone!r}; expected "
+        "conv3d_next|conv3d_next_attn|conv3d_next_vit_stem|vit3d"
+    )
 
 
 def get_model_and_loss_cnn(dims, num_res_blocks, num_frames, in_chans=2, sim_coeff=25, std_coeff=25, cov_coeff=1,

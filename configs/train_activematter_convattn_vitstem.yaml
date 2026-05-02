@@ -1,0 +1,77 @@
+defaults:
+  - dataset: active_matter
+  - model: conv_small
+  - ft: linear
+
+# Tokenization ablation: ViT-style 3D patchify (4x16x16) feeding a SINGLE
+# attention block. No positional embedding, no residual blocks, channels-first
+# LayerNorm. Compare directly against:
+#   - train_activematter_vit3d.yaml (same patchify + 6 attn blocks + posemb)
+#   - train_activematter_convattn.yaml (ConvNeXt encoder + 1 attn at stage 4)
+# This isolates "ViT-style tokenization vs ConvNeXt downsampling" while holding
+# transformer depth fixed at 1.
+
+dataset:
+  num_frames: 16
+  resize_mode: fft
+  resolution: [256, 256]
+
+model:
+  objective: "jepa"
+  # `name` drives W&B tags / on-disk run_name; keep it descriptive.
+  name: "convattn_vitstem"
+  # `dims[-1]` must equal the ViT embed_dim so ConvPredictor sees matching
+  # channels (encoder.dims = [embed_dim, embed_dim]).
+  dims: [16, 32, 64, 128, 384]
+  num_res_blocks: [3, 3, 3, 9, 3]
+  backbone: "conv3d_next_vit_stem"
+  vit3d:
+    patch_size: [4, 16, 16]      # (pt, ph, pw) -> T'=4, H'=W'=16 tokens
+    embed_dim: 384
+    num_heads: 6
+    mlp_ratio: 4.0
+
+train:
+  num_epochs: 30
+  batch_size: 8                  # cheaper than full ViT3D; 8 fits comfortably
+  precision: "bf16"
+  report_every: 100
+  save_every: 2
+  include_labels: false
+  regularizer: "vicreg"
+  sim_coeff: 2
+  std_coeff: 40
+  cov_coeff: 2
+  predict_n_steps: false
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 3
+  min_lr: 1e-6
+  lr: 5e-4
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  noise_std: 1.0
+  run_name: "convattn-vitstem-depth1"
+  distributed: true
+
+ft:
+  task: "regression"
+  use_attentive_pooling: true
+  lr_scheduler: "cosine"
+  lr_scheduler_warmup_epochs: 2
+  min_lr: 0
+  lr: 1e-3
+  weight_decay: 0.01
+  noise_std: 1.0
+  run_name: "activematter-convattn-vitstem-FT"
+  distributed: false
+
+out_path: "./checkpoints"
+cache_path: "./dataset_cache"
+
+post_train_eval:
+  enabled: true
+  probes: [linear, knn, attentive]
+  frozen_config: configs/train_activematter_frozen.yaml
+  on_save: true
+  on_save_blocking: true
+  on_save_probes: [linear, knn, attentive]

@@ -98,7 +98,8 @@ class ConvEncoder(nn.Module):
                  num_frames=4,
                  attn_stages: Optional[Sequence[int]] = None,
                  attn_num_heads: int = 4,
-                 attn_mlp_ratio: float = 4.0):
+                 attn_mlp_ratio: float = 4.0,
+                 attn_depth: int = 1):
         super().__init__()
         stem = nn.Sequential(
             nn.Conv3d(in_chans, dims[0], kernel_size=(1, 4, 4), padding='same'),
@@ -160,16 +161,35 @@ class ConvEncoder(nn.Module):
         # transformer `Block` is inserted. Empty -> no attention modules;
         # self.attn_blocks stays empty and adds no parameters.
         self.attn_stages = tuple(sorted(set(int(i) for i in (attn_stages or []))))
+        self.attn_depth = max(1, int(attn_depth))
         self.attn_blocks = nn.ModuleDict()
         for stage_idx in self.attn_stages:
             if stage_idx < 0 or stage_idx >= len(dims):
                 raise ValueError(f"attn_stages index {stage_idx} out of range [0, {len(dims)-1}]")
-            self.attn_blocks[str(stage_idx)] = AttnBlock(
-                dim=dims[stage_idx],
-                num_heads=attn_num_heads,
-                mlp_ratio=attn_mlp_ratio,
-                qkv_bias=True,
-            )
+            # Stack `attn_depth` transformer Blocks at this stage.
+            # IMPORTANT: when attn_depth == 1, store the bare AttnBlock so
+            # state-dict keys (`attn_blocks.<i>.norm1.weight`, ...) match
+            # checkpoints saved before this parameter existed. Deeper stacks
+            # use a Sequential, which renames keys to `attn_blocks.<i>.<k>.*`
+            # — a fresh layout, so deeper-attn checkpoints never collide
+            # with the old single-block ones.
+            if self.attn_depth == 1:
+                self.attn_blocks[str(stage_idx)] = AttnBlock(
+                    dim=dims[stage_idx],
+                    num_heads=attn_num_heads,
+                    mlp_ratio=attn_mlp_ratio,
+                    qkv_bias=True,
+                )
+            else:
+                self.attn_blocks[str(stage_idx)] = nn.Sequential(*[
+                    AttnBlock(
+                        dim=dims[stage_idx],
+                        num_heads=attn_num_heads,
+                        mlp_ratio=attn_mlp_ratio,
+                        qkv_bias=True,
+                    )
+                    for _ in range(self.attn_depth)
+                ])
 
     def _apply_attn(self, x: torch.Tensor, stage_idx: int) -> torch.Tensor:
         """Apply the stage's attention block to (B, C, *) tensors.
@@ -203,6 +223,97 @@ class ConvEncoder(nn.Module):
             if i in self.attn_stages:
                 x = self._apply_attn(x, i)
         return x
+
+class ConvEncoderViTStem(nn.Module):
+    """ViT-style 3D patchify -> single attention block. No pos embed.
+
+    Tokenization ablation between `vit3d` (full transformer over 3D patches,
+    learnable pos embed, depth N) and `conv3d_next_attn` (ConvNeXt encoder
+    with attention at the last stage). This isolates the *tokenization* step:
+      - same Conv3d patchify (kernel=stride=patch_size) as `ViT3DEncoder`,
+      - channels-first LayerNorm in place of `nn.LayerNorm` post-patch,
+      - **no** learnable positional embedding,
+      - **0** residual blocks,
+      - **1** transformer Block (vs ViT3D's `depth`).
+
+    Output contract matches ConvEncoder/ViT3DEncoder: (B, embed_dim, H', W')
+    via mean-pool over the temporal patch axis, so `ConvPredictor` wires up
+    unchanged. Exposes `dims = [embed_dim, embed_dim]` for the same reason.
+    """
+
+    def __init__(
+        self,
+        in_chans: int = 11,
+        num_frames: int = 16,
+        img_size: Tuple[int, int] = (256, 256),
+        patch_size: Tuple[int, int, int] = (4, 16, 16),   # (pt, ph, pw)
+        embed_dim: int = 384,
+        num_heads: int = 6,
+        mlp_ratio: float = 4.0,
+    ):
+        super().__init__()
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        pt, ph, pw = patch_size
+        if num_frames % pt != 0:
+            raise ValueError(f"num_frames ({num_frames}) must be divisible by patch_size[0] ({pt})")
+        if img_size[0] % ph != 0 or img_size[1] % pw != 0:
+            raise ValueError(f"img_size {img_size} must be divisible by spatial patch {(ph, pw)}")
+
+        self.in_chans = in_chans
+        self.num_frames = num_frames
+        self.img_size = tuple(img_size)
+        self.patch_size = (pt, ph, pw)
+        self.T_out = num_frames // pt
+        self.H_out = img_size[0] // ph
+        self.W_out = img_size[1] // pw
+        self.embed_dim = embed_dim
+
+        self.patch_embed = nn.Conv3d(
+            in_channels=in_chans,
+            out_channels=embed_dim,
+            kernel_size=(pt, ph, pw),
+            stride=(pt, ph, pw),
+        )
+        # Channels-first LayerNorm matches the ConvNet style (rather than
+        # nn.LayerNorm applied to flattened tokens, which is what ViT3D does).
+        self.norm_pre_attn = LayerNorm(embed_dim, data_format="channels_first")
+        # No learnable pos embed: we want positional info to come purely from
+        # the conv stem's spatial structure, so this ablation tests whether
+        # 1 attn block over conv-stem tokens (no posemb) is enough to match
+        # vit3d's depth-6 stack.
+        self.attn = AttnBlock(
+            dim=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=True,
+        )
+
+        # Match ViT3DEncoder/ConvEncoder dims contract for ConvPredictor wiring.
+        self.dims = [embed_dim, embed_dim]
+
+    def forward(self, x, **kwargs):
+        # x: (B, C, T, H, W). Pad/crop time like ViT3DEncoder so this drops
+        # in for the same input contract.
+        B, C, T, H, W = x.shape
+        if T < self.num_frames:
+            x = F.pad(x, (0, 0, 0, 0, 0, self.num_frames - T))
+        elif T > self.num_frames:
+            x = x[:, :, : self.num_frames]
+        x = self.patch_embed(x)               # (B, D, T', H', W')
+        x = self.norm_pre_attn(x)             # channels-first LN
+        B, D, Tp, Hp, Wp = x.shape
+        # Tokenize -> single attention block -> reshape back. No pos embed.
+        tokens = x.flatten(2).transpose(1, 2).contiguous()    # (B, T'*H'*W', D)
+        tokens = self.attn(tokens)
+        x = tokens.transpose(1, 2).reshape(B, D, Tp, Hp, Wp).contiguous()
+        # Collapse time to match ViT3DEncoder's (B, D, H', W') output.
+        if Tp == 1:
+            x = x.squeeze(2)
+        else:
+            x = x.mean(dim=2)
+        return x
+
 
 class ConvEncoderViTTiny(nn.Module):
     def __init__(self,

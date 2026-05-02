@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=csci_ga_2572-2026sp
+#SBATCH --account=csci_ga_2590_001-2026sp
 #SBATCH --partition=c12m85-a100-1
 #SBATCH --job-name=jepa-eval-frozen
 #SBATCH --nodes=1

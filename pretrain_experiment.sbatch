@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=csci_ga_2572-2026sp
+#SBATCH --account=csci_ga_2590_001-2026sp
 #SBATCH --partition=c12m85-a100-1
 #SBATCH --job-name=jepa-pretrain-exp
 #SBATCH --nodes=1
@@ -18,20 +18,24 @@
 # group.
 #
 # usage:
-#   sbatch pretrain_experiment.sbatch sigreg       # SIGReg regularizer
-#   sbatch pretrain_experiment.sbatch vit3d        # ViT3D backbone
-#   sbatch pretrain_experiment.sbatch convattn     # conv3d_next + self-attn
-#   sbatch pretrain_experiment.sbatch baseline     # identical to pretrain_fft.sbatch activematter
+#   sbatch pretrain_experiment.sbatch sigreg              # SIGReg regularizer
+#   sbatch pretrain_experiment.sbatch vit3d               # ViT3D backbone
+#   sbatch pretrain_experiment.sbatch convattn            # conv3d_next + self-attn (1 block @ stage 4)
+#   sbatch pretrain_experiment.sbatch convattn_vitstem    # ViT-style patchify + 1 attn block (no posemb)
+#   sbatch pretrain_experiment.sbatch convattn_depth6     # convattn with 6 attn blocks @ stage 4
+#   sbatch pretrain_experiment.sbatch baseline            # identical to pretrain_fft.sbatch activematter
 
 set -euo pipefail
 
 EXP="${1:-sigreg}"
 case "$EXP" in
-  baseline)  CONFIG=configs/train_activematter_small.yaml ;;
-  sigreg)    CONFIG=configs/train_activematter_sigreg.yaml ;;
-  vit3d)     CONFIG=configs/train_activematter_vit3d.yaml ;;
-  convattn)  CONFIG=configs/train_activematter_convattn.yaml ;;
-  *) echo "unknown experiment $EXP (expected baseline|sigreg|vit3d|convattn)"; exit 2 ;;
+  baseline)         CONFIG=configs/train_activematter_small.yaml ;;
+  sigreg)           CONFIG=configs/train_activematter_sigreg.yaml ;;
+  vit3d)            CONFIG=configs/train_activematter_vit3d.yaml ;;
+  convattn)         CONFIG=configs/train_activematter_convattn.yaml ;;
+  convattn_vitstem) CONFIG=configs/train_activematter_convattn_vitstem.yaml ;;
+  convattn_depth6)  CONFIG=configs/train_activematter_convattn_depth6.yaml ;;
+  *) echo "unknown experiment $EXP (expected baseline|sigreg|vit3d|convattn|convattn_vitstem|convattn_depth6)"; exit 2 ;;
 esac
 
 REPO=/scratch/$USER/physical-representation-learning
