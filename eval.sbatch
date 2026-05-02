@@ -27,12 +27,18 @@ set -euo pipefail
 
 CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
 PROBES="${2:-linear knn attentive}"   # space-separated, e.g. "linear knn"
-# Default to clean 224 eval. Set $3 to "" or another dotlist to change.
-# - dataset.resolution=224  -> resize all frames to 224x224 (resize_mode left as
-#   pretrain's, so FFT-pretrained models evaluate via FFT-resize, bilinear via bilinear)
+# Default to clean (no-noise) eval at the run's training resolution. Set $3 to
+# "" to use the run config exactly, or pass another dotlist to change.
 # - train.noise_std=0.0     -> _resolved_noise_std() falls back to this when ft is unset
 # - ft.noise_std=0.0        -> belt-and-suspenders for paths that read ft.noise_std first
-OVERRIDES="${3:-dataset.resolution=224 train.noise_std=0.0 ft.noise_std=0.0}"
+#
+# WARNING: Do NOT add `dataset.resolution=...` here unless you know the encoder
+# tolerates resize. ViT3DEncoder has a learnable `pos_embed` of shape
+# (1, T'*H'*W', D) baked at training resolution; evaluating at a different
+# resolution silently slices the first N pos embeddings (see
+# physics_jepa/utils/model_utils.py:499) and tanks accuracy. Conv encoders are
+# safe.
+OVERRIDES="${3:-train.noise_std=0.0 ft.noise_std=0.0}"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
