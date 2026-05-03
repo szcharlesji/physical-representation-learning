@@ -50,6 +50,19 @@ EVAL_CURVE_RUNS: list[EvalCurveRun] = [
 VIT3D_GROUP = "active_matter-16frames-vit3d-jepa-vit3d-depth6_2026-04-25_11-11-48"
 VIT3D_LABEL = "vit3d"
 
+# Conv+Attn ×6 (deeper attention head): 6 transformer blocks at the end of
+# the conv stack. HPC-quota cut training short at epoch 5; only 3 frozen
+# probe_frozen runs exist (one per saved checkpoint) — listed by run id
+# rather than scanned by group, since the runs are scattered across two
+# launch attempts and group filtering picks up extras.
+CNN_ATTN_D6_LABEL = "cnn_attn_d6"
+CNN_ATTN_D6_RUNS: list[tuple[int, str]] = [
+    (1, "hfnzs0zr"),
+    (3, "0mguarjj"),
+    (5, "zled9non"),
+    (7, "j1bl1ph4"),
+]
+
 EVAL_CURVE_METRIC_KEYS = [
     "epoch",
     "linear/mean", "linear/alpha", "linear/zeta",
@@ -124,6 +137,54 @@ def fetch_vit3d_per_ckpt(refresh: bool) -> tuple[list[dict], dict]:
             "knn/best_k": _f(s.get("knn/best_k")),
             "knn/best_metric_is_cosine": _bool_to_int(s.get("knn/best_metric")),
             # Attentive crashed for ViT3D — leave NaN.
+            "attentive/mean": None,
+            "attentive/alpha": None,
+            "attentive/zeta": None,
+        })
+    rows.sort(key=lambda r: r["epoch"])
+
+    df = pd.DataFrame(rows)
+    summary = {}
+    for probe in ("linear", "knn", "attentive"):
+        col = f"{probe}/mean"
+        if col in df and df[col].notna().any():
+            best_idx = df[col].idxmin()
+            summary[f"{probe}/best_mean"] = float(df.loc[best_idx, col])
+            summary[f"{probe}/best_alpha"] = _opt_float(df.loc[best_idx, f"{probe}/alpha"])
+            summary[f"{probe}/best_zeta"] = _opt_float(df.loc[best_idx, f"{probe}/zeta"])
+            summary[f"{probe}/best_epoch"] = int(df.loc[best_idx, "epoch"])
+    cache.write_text(json.dumps({"history": rows, "summary": summary}))
+    return rows, summary
+
+
+def fetch_cnn_attn_d6_per_ckpt(refresh: bool) -> tuple[list[dict], dict]:
+    """Reconstruct a curve for the conv+attn×6 group from 3 probe_frozen runs.
+
+    Same shape as `fetch_vit3d_per_ckpt`, but the (epoch, run_id) mapping is
+    explicit instead of group-scanned. Each run's summary is read for any
+    linear/* and knn/* keys; missing keys come back as None and are dropped
+    by `dropna(subset=["mse"])` downstream.
+    """
+    cache = _cache_path(f"{CNN_ATTN_D6_LABEL}_per_ckpt")
+    if cache.exists() and not refresh:
+        payload = json.loads(cache.read_text())
+        return payload["history"], payload["summary"]
+
+    api = _api()
+    rows: list[dict] = []
+    for epoch, run_id in CNN_ATTN_D6_RUNS:
+        run = api.run(f"{ENTITY}/{PROJECT}/{run_id}")
+        s = run.summary
+        rows.append({
+            "epoch": epoch,
+            "linear/mean": _f(s.get("linear/val_mse")),
+            "linear/alpha": _f(s.get("linear/val_mse_alpha")),
+            "linear/zeta": _f(s.get("linear/val_mse_zeta")),
+            "knn/mean": _f(s.get("knn/best_val_mse")),
+            "knn/alpha": _f(s.get("knn/best_val_mse_alpha")),
+            "knn/zeta": _f(s.get("knn/best_val_mse_zeta")),
+            "knn/best_k": _f(s.get("knn/best_k")),
+            "knn/best_metric_is_cosine": _bool_to_int(s.get("knn/best_metric")),
             "attentive/mean": None,
             "attentive/alpha": None,
             "attentive/zeta": None,
@@ -231,6 +292,13 @@ def main():
     print(f"        wrote {path.relative_to(DATA_DIR)} ({len(history)} rows)")
     long_frames.append(history_to_long(VIT3D_LABEL, history))
     summary_records.extend(summary_rows(VIT3D_LABEL, summary))
+
+    print(f"[fetch] {CNN_ATTN_D6_LABEL} (per-checkpoint reconstruction, 3 runs)")
+    history, summary = fetch_cnn_attn_d6_per_ckpt(args.refresh)
+    path = write_curves_csv(CNN_ATTN_D6_LABEL, history)
+    print(f"        wrote {path.relative_to(DATA_DIR)} ({len(history)} rows)")
+    long_frames.append(history_to_long(CNN_ATTN_D6_LABEL, history))
+    summary_records.extend(summary_rows(CNN_ATTN_D6_LABEL, summary))
 
     long = pd.concat(long_frames, ignore_index=True)
     long_path = DATA_DIR / "all_runs_long.csv"

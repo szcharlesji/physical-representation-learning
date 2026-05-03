@@ -26,12 +26,13 @@ plt.style.use(DATA_DIR / "presets.mplstyle")
 
 # Display order, color and linestyle for each label
 LABELS = [
-    ("vicreg_bs2",  "VICReg, bs=2 (fp32)",        "#888888", "--", "o"),
-    ("vicreg_bs8",  "VICReg, bs=8 (bf16)",        "#1f77b4", "-",  "o"),
-    ("fft",         "VICReg + FFT preproc",       "#ff7f0e", "-",  "o"),
-    ("cnn_attn",    "Conv+Attn (FFT)",            "#2ca02c", "-",  "o"),
-    ("sigreg",      "SIGReg (FFT, did not conv.)","#d62728", ":",  "o"),
-    ("vit3d",       "ViT3D-d6 (FFT)",             "#9467bd", "-",  "s"),
+    ("vicreg_bs2",   "VICReg, bs=2 (fp32)",         "#888888", "--", "o"),
+    ("vicreg_bs8",   "VICReg, bs=8 (bf16)",         "#1f77b4", "-",  "o"),
+    ("fft",          "VICReg + FFT preproc",        "#ff7f0e", "-",  "o"),
+    ("cnn_attn",     "Conv+Attn (FFT)",             "#2ca02c", "-",  "o"),
+    ("cnn_attn_d6",  "Conv+Attn ×6 (FFT, 5 ep)",    "#17becf", "-",  "^"),
+    ("sigreg",       "SIGReg (FFT, did not conv.)", "#d62728", ":",  "o"),
+    ("vit3d",        "ViT3D-d6 (FFT)",              "#9467bd", "-",  "s"),
 ]
 LABEL_ORDER = [t[0] for t in LABELS]
 STYLE = {t[0]: dict(label=t[1], color=t[2], linestyle=t[3], marker=t[4])

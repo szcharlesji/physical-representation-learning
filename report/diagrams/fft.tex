@@ -1,23 +1,80 @@
 % FFT-based resize pipeline (resize_mode: fft).
-% Standalone tikzpicture; relies on shared styles in _tikz_styles.tex.
+% Adds tiny spatial- / frequency-domain thumbnails so the reader can see
+% what each step does to the data.
 \begin{tikzpicture}[
-  node distance = 4mm and 6mm,
+  node distance = 4mm and 7mm,
   every node/.style = {font=\scriptsize, inner sep=1.5pt}]
 
-  \node[data]                  (x)   {$x$};
-  \node[op,   right=of x]      (fft) {$\mathcal{F}_{2}$};
-  \node[op,   right=of fft]    (sh1) {fftshift};
-  \node[op,   right=of sh1]    (cp)  {crop\,/\,pad};
-  \node[op,   right=of cp]     (sh2) {ifftshift};
-  \node[op,   right=of sh2]    (ift) {$\mathcal{F}_{2}^{-1}$};
-  \node[op,   right=of ift]    (sc)  {$\times\rho$};
-  \node[data, right=of sc]     (y)   {$y$};
+  % ---------- thumbnail helper styles --------------------------------
+  % spatial-domain thumbnail: a few diagonal "wave" stripes
+  % frequency-domain thumbnail: a centred bright DC bin with a faint halo
 
-  \foreach \a/\b in {x/fft, fft/sh1, sh1/cp, cp/sh2, sh2/ift, ift/sc, sc/y}
-    \draw[arrow] (\a) -- (\b);
+  % ---------- input spatial thumbnail --------------------------------
+  \begin{scope}[local bounding box=xthumb]
+    \fill[blue!12] (0,0) rectangle (0.7,0.7);
+    \foreach \k in {0.05, 0.20, 0.35, 0.50, 0.65} {
+      \draw[blue!60!black, thin] (0,\k) -- (0.7-\k, 0.7);
+      \draw[blue!60!black, thin] (\k, 0) -- (0.7, 0.7-\k);
+    }
+    \draw[draw=blue!70!black, thick] (0,0) rectangle (0.7,0.7);
+  \end{scope}
+  \node[meta, below=1mm of xthumb] {input};
+  \node[meta, above=0mm of xthumb] {$C{\times}H_n{\times}W_n$};
+  % ---------- F2: full spectrum thumbnail ----------------------------
+  \node[op, right=of xthumb] (fft) {$\mathcal{F}_{2}$};
+  \begin{scope}[local bounding box=spec1, shift={($(fft.east) + (0.65, -0.35)$)}]
+    \fill[orange!12] (0,0) rectangle (0.7,0.7);
+    % bright DC bin + halo
+    \foreach \r/\op in {0.30/35, 0.20/55, 0.12/75, 0.06/95} {
+      \fill[orange!\op] (0.35,0.35) circle (\r);
+    }
+    \draw[orange!80!black, thick, dashed] (0.35,0) -- (0.35,0.7);
+    \draw[orange!80!black, thick, dashed] (0,0.35) -- (0.7,0.35);
+    \draw[draw=orange!80!black, thick] (0,0) rectangle (0.7,0.7);
+  \end{scope}
+  \node[meta, below=1mm of spec1] {fftshift};
+  \node[meta, above=0mm of spec1] {DC at centre};
+  \draw[arrow, thick] (xthumb.east) -- (fft.west);
+  \draw[arrow, thick] (fft.east) -- ($(spec1.west) + (0,0.0)$);
 
-  \node[meta, below=2mm of x]   {$C{\times}H_{n}{\times}W_{n}$};
-  \node[meta, below=2mm of cp]  {around DC bin};
-  \node[meta, below=2mm of sc]  {$\rho{=}HW/H_{n}W_{n}$};
-  \node[meta, below=2mm of y]   {$C{\times}H{\times}W$};
+  % ---------- crop / pad ---------------------------------------------
+  \node[op, right=of spec1, align=center, fill=yellow!18] (cp)
+    {crop\,/\,pad\\around DC};
+  \begin{scope}[local bounding box=spec2,
+                shift={($(cp.east) + (0.55, -0.27)$)}]
+    \fill[orange!12] (0,0) rectangle (0.55,0.55);
+    \foreach \r/\op in {0.22/35, 0.14/55, 0.08/75, 0.04/95} {
+      \fill[orange!\op] (0.275,0.275) circle (\r);
+    }
+    \draw[draw=orange!80!black, thick] (0,0) rectangle (0.55,0.55);
+  \end{scope}
+  \draw[arrow, thick] (spec1.east) -- (cp.west);
+  \draw[arrow, thick] (cp.east) -- ($(spec2.west) + (0,0)$);
+  \node[meta, below=1mm of spec2] {target $H{\times}W$};
+
+  % ---------- ifftshift, F2^-1, scale --------------------------------
+  \node[op, right=of spec2] (ift) {$\mathcal{F}_{2}^{-1}$};
+  \node[op, right=of ift,  align=center] (sc)  {$\times\,\rho$};
+  \node[meta, below=1mm of sc] {$\rho{=}HW/H_nW_n$};
+
+  % ---------- output spatial thumbnail -------------------------------
+  \begin{scope}[local bounding box=ythumb,
+                shift={($(sc.east) + (0.65, -0.35)$)}]
+    \fill[blue!12] (0,0) rectangle (0.7,0.7);
+    \foreach \k in {0.10, 0.30, 0.50} {
+      \draw[blue!60!black, thin] (0,\k) -- (0.7-\k, 0.7);
+      \draw[blue!60!black, thin] (\k, 0) -- (0.7, 0.7-\k);
+    }
+    \draw[draw=blue!70!black, thick] (0,0) rectangle (0.7,0.7);
+  \end{scope}
+  \node[meta, below=1mm of ythumb] {output};
+  \node[meta, above=0mm of ythumb] {$C{\times}H{\times}W$};
+  \draw[arrow, thick] (spec2.east) -- (ift.west);
+  \draw[arrow, thick] (ift.east) -- (sc.west);
+  \draw[arrow, thick] (sc.east) -- ($(ythumb.west) + (0,0)$);
+
+  % bottom note
+  \node[meta, below=8mm of cp, align=center, gray!70!black]
+    {centre crop preserves the lowest spatial frequencies;\\
+     periodic boundary conditions are exact (no interpolation, no window)};
 \end{tikzpicture}

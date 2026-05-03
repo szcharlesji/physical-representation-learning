@@ -1,29 +1,90 @@
-% conv3d_next_attn encoder (default conv backbone with attn at stage 4).
+% conv3d_next_attn encoder.
+% Two-row layout that mirrors ViT3D, with the key visual contrast:
+% the post-conv tensor is drawn as a flat spatial grid (no depth)
+% so it is visually obvious that the attention has only spatial
+% structure to mix — there is no temporal axis left to act on.
 \begin{tikzpicture}[
-  node distance = 4mm and 4mm,
+  node distance = 6mm and 6mm,
   every node/.style = {font=\scriptsize, inner sep=1.5pt}]
 
-  \node[data]                                                  (x)    {$x$};
-  \node[op,    right=of x,  align=center]                       (stem) {Stem\\$1{\times}4{\times}4$\\$11{\to}16$};
-  \node[block, right=of stem, align=center, minimum width=15mm] (s0) {Stage 0\\$3{\times}$ ResB\\$16{\to}32$};
-  \node[block, right=of s0,   align=center, minimum width=15mm] (s1) {Stage 1\\$3{\times}$ ResB\\$32{\to}64$};
-  \node[block, right=of s1,   align=center, minimum width=15mm] (s2) {Stage 2\\$9{\times}$ ResB\\$64{\to}128$};
-  \node[block, right=of s2,   align=center, minimum width=15mm] (s3) {Stage 3\\$3{\times}$ ResB\\$128$};
-  \node[attn,  right=of s3,   align=center]                     (att) {Attn\\$h{=}4$};
-  \node[data,  right=of att]                                    (z)    {$z$};
+  % =====================================================================
+  % ROW 1: pipeline
+  % =====================================================================
+  \node[data]                                                   (x)    {$x$};
+  \node[op,    right=14mm of x, align=center, font=\tiny]       (stem) {Stem\\$1{\times}4{\times}4$\\$11{\to}16$};
+  \node[block, right=of stem, align=center, font=\tiny, minimum width=14mm] (s0) {Stage 0\\$3{\times}$ ResB\\$16{\to}32$};
+  \node[block, right=of s0,   align=center, font=\tiny, minimum width=14mm] (s1) {Stage 1\\$3{\times}$ ResB\\$32{\to}64$};
+  \node[block, right=of s1,   align=center, font=\tiny, minimum width=14mm] (s2) {Stage 2\\$9{\times}$ ResB\\$64{\to}128$};
+  \node[block, right=of s2,   align=center, font=\tiny, minimum width=14mm] (s3) {Stage 3\\$3{\times}$ ResB\\$128$};
 
-  \foreach \a/\b in {x/stem, stem/s0, s0/s1, s1/s2, s2/s3, s3/att, att/z}
+  \foreach \a/\b in {x/stem, stem/s0, s0/s1, s1/s2, s2/s3}
     \draw[arrow] (\a) -- (\b);
 
-  \node[meta, below=2mm of x]    {input};
-  \node[meta, below=2mm of stem] {stem};
+  \node[meta, above=2mm of x]    {$(B,11,16,256,256)$};
+  \node[meta, above=2mm of stem] {$(16,\mathbf{16},64,64)$};
+  \node[meta, above=2mm of s0]   {$(32,\mathbf{8},32,32)$};
+  \node[meta, above=2mm of s1]   {$(64,\mathbf{8},16,16)$};
+  \node[meta, above=2mm of s2]   {$(128,\mathbf{4},8,8)$};
+  \node[meta, above=2mm of s3]   {$(128,\mathbf{4},4,4)$};
+
+  \node[meta, below=2mm of stem] {$\downarrow{\times}(1,4,4)$};
   \node[meta, below=2mm of s0]   {$\downarrow{\times}(2,2,2)$};
   \node[meta, below=2mm of s1]   {$\downarrow{\times}(1,2,2)$};
   \node[meta, below=2mm of s2]   {$\downarrow{\times}(2,2,2)$};
   \node[meta, below=2mm of s3]   {$\downarrow{\times}(1,2,2)$};
-  \node[meta, below=2mm of att]  {only \texttt{cnn\_attn}};
-  \node[meta, below=2mm of z]    {output};
 
-  \node[meta, above=2mm of x]    {$(B,11,4,224,224)$};
-  \node[meta, above=2mm of z]    {$(B,128,1,14,14)$};
+  % T axis collapse highlight
+  \draw[thick, gray!70]
+    ($(stem.south west) + (0, -0.85)$) --
+    ($(s3.south east) + (0, -0.85)$);
+  \draw[thick, gray!70]
+    ($(stem.south west) + (0, -0.85)$) -- ++(0, 0.12);
+  \draw[thick, gray!70]
+    ($(s3.south east) + (0, -0.85)$) -- ++(0, 0.12);
+  \node[font=\tiny, gray!75!black, align=center, anchor=north]
+    at ($(s1.south east)!0.5!(s2.south west) + (0, -1.05)$)
+    {strided 3D conv collapses time:
+     $T{=}16 \to 4$, $H{=}256 \to 4$, $W{=}256 \to 4$};
+
+  % =====================================================================
+  % ROW 2: a flat 4x4 spatial grid -- "no temporal info left"
+  % =====================================================================
+  \node[below=32mm of s1.south] (grid_anchor) {};
+
+  % single flat plane representing the post-conv tensor.
+  % (4 t'-slices collapsed visually into one plane to emphasize that
+  % the temporal axis carries no usable information.)
+  \begin{scope}[local bounding box=grid]
+    \draw[fill=blue!28, draw=blue!60!black, thick]
+      ($(grid_anchor)$) rectangle ++(1.6, 1.6);
+    \foreach \g in {0.4, 0.8, 1.2} {
+      \draw[blue!50, thin] ($(grid_anchor) + (\g, 0)$) -- ++(0, 1.6);
+      \draw[blue!50, thin] ($(grid_anchor) + (0, \g)$) -- ++(1.6, 0);
+    }
+    % a few in-plane (purely spatial) attention edges
+    \draw[<->, thick, gray!55!black]
+      ($(grid_anchor) + (0.20, 0.20)$) --
+      ($(grid_anchor) + (1.40, 1.40)$);
+    \draw[<->, thick, gray!55!black]
+      ($(grid_anchor) + (0.20, 1.40)$) --
+      ($(grid_anchor) + (1.40, 0.20)$);
+  \end{scope}
+  \node[font=\tiny, gray!85, align=center, below=2mm of grid]
+    {post-conv map\\$(128,\,4{\times}4{\times}4)$ — \emph{no per-frame info left}};
+
+  % connector: right of Stage 3 -> down past the caption -> left ->
+  % down onto the post-conv grid. Routed around the right side so it
+  % does not cross the brace caption.
+  \coordinate (c1) at ($(s3.east) + (0.55, 0)$);
+  \coordinate (c3) at ($(grid.north) + (0, 0.30)$);
+  \coordinate (c2) at (c1 |- c3);
+  \draw[arrow, thick]
+    (s3.east) -- (c1) -- (c2) -- (c3) -- ($(grid.north) + (0, 0.05)$);
+
+  % attention block (no z output — diagram stops at attention)
+  \node[attn, right=18mm of grid.east, align=center, font=\tiny,
+        minimum width=22mm, minimum height=14mm]
+    (att) {Attn$\,\times\,k$\\$h{=}4$, ($k{=}1$ or $6$)\\\textit{spatial mixing only}};
+  \draw[arrow, thick] (grid.east) -- (att.west);
+
 \end{tikzpicture}
