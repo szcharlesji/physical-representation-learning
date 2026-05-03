@@ -10,37 +10,27 @@
 #SBATCH --error=diag_%j.err
 
 # usage:
-#   sbatch diag_old_val.sbatch <ckpt.pth> [<overrides>]
+#   sbatch diag_old_val.sbatch <train_cache.pt> <val_cache.pt>
 #
-# <overrides>: single shell-quoted dotlist string applied to the run's
-# config.yaml, mirroring eval.sbatch's 3rd arg. Default matches eval.sbatch's
-# default (clean-noise eval at the run's training resolution), so the cache
-# hash matches whatever your y8naqdos / pcyd4gb7 runs wrote.
-#
-# Example:
-#   sbatch diag_old_val.sbatch <ckpt> "train.noise_std=1.0"
-#       # if the cache you want to inspect was written with noise=1.0
+# Pass cache files by hash directly. From your eval log:
+#   train: feature_cache/7e10dd9e7e6f7539.pt
+#   val:   feature_cache/61724e8be6e62d7b.pt
+#   test:  feature_cache/fd93cf3dd69b5a51.pt
+# (val cache is what we sub-sample for the half-split diagnostic; test cache
+# isn't needed.)
 
 set -euo pipefail
 
-CKPT="${1:?pass the encoder .pth checkpoint path as argument}"
-OVERRIDES="${2:-train.noise_std=0.0 ft.noise_std=0.0}"
+TRAIN_CACHE="${1:?pass the train cache .pt path}"
+VAL_CACHE="${2:?pass the val cache .pt path}"
 
 REPO=/scratch/$USER/physical-representation-learning
 OVERLAY=$REPO/overlay-15GB-500K.ext3
 IMAGE=/share/apps/images/cuda13.0.1-cudnn9.13.0-ubuntu-24.04.3.sif
 
-RUN_DIR_FULL=$(dirname "$CKPT")
-RUN_CONFIG="$RUN_DIR_FULL/config.yaml"
-if [[ ! -f "$RUN_CONFIG" ]]; then
-  echo "ERROR: $RUN_CONFIG not found."
-  exit 2
-fi
-
 echo "[$(date)] Job $SLURM_JOB_ID on $(hostname)"
-echo "checkpoint: $CKPT"
-echo "run config: $RUN_CONFIG"
-echo "overrides:  $OVERRIDES"
+echo "train cache: $TRAIN_CACHE"
+echo "val   cache: $VAL_CACHE"
 
 singularity exec \
   --overlay "$OVERLAY:ro" \
@@ -50,9 +40,8 @@ singularity exec \
     conda activate jepa
     cd $REPO
     python scripts/diag_old_val_split.py \
-      --config $RUN_CONFIG \
-      --checkpoint $CKPT \
-      $OVERRIDES
+      --train '$TRAIN_CACHE' \
+      --val   '$VAL_CACHE'
   "
 
 echo "[$(date)] Done."
