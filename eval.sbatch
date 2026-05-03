@@ -82,7 +82,7 @@ singularity exec --nv \
       --config $RUN_CONFIG \
       --checkpoint $CKPT \
       --probes $PROBES \
-      $OVERRIDES
+      -- $OVERRIDES
   "
 
 echo "[$(date)] Done — frozen results at $OUT_DIR/results.json"
