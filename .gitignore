@@ -25,3 +25,4 @@ report/*.log
 report/*.out
 report/*.toc
 report/*.pdf
+/report/.texpadtmp
